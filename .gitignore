@@ -4,6 +4,7 @@ core*
 *.exp*
 *.swo
 *.swp
+*.swn
 train-container-sandbox/
 *model*
 cross_validation_results/
