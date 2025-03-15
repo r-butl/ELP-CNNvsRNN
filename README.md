@@ -19,7 +19,7 @@ singularity exec --writable sandbox_container/ bash
 
 Now, execute pip to install Ray Tune, which is used for hyperparameter tuning of the model.
 ```
-pip install -U "ray[data,train,tune,serve]" argparse
+pip install -U "ray[data,train,tune,serve]" argparse optuna
 ```
 
 Once this installation is complete, exit the shell and the contents should be saved:
