@@ -4,5 +4,6 @@ core*
 *.exp*
 *.swo
 *.swp
+*.swn
 train-container-sandbox/
 *model*
