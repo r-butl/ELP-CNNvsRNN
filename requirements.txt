@@ -1,0 +1,23 @@
+# Core ML libraries
+tensorflow>=2.10.0
+tensorflow-model-optimization>=0.7.0
+numpy>=1.21.0
+scikit-learn>=1.0.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Configuration and utilities
+pyyaml>=6.0
+pandas>=1.3.0
+
+# Hyperparameter optimization
+ray[tune]>=2.0.0
+optuna>=3.0.0
+
+# Workflow management
+snakemake>=7.0.0
+
+# Additional utilities
+tqdm>=4.60.0

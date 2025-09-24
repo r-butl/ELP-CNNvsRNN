@@ -1,2 +1,0 @@
-avg_loss,avg_acc,timestamp,checkpoint_dir_name,done,training_iteration,trial_id,date,time_this_iter_s,time_total_s,pid,hostname,node_ip,time_since_restore,iterations_since_restore
-0.5535498276352883,"tf.Tensor(0.55625, shape=(), dtype=float32)",1742077382,,False,1,d6a9f_00019,2025-03-15_15-23-02,110.66534042358398,110.66534042358398,1056973,exp-3-60,198.202.103.75,110.66534042358398,1

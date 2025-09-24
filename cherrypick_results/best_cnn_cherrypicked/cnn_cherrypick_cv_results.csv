@@ -1,7 +1,0 @@
-,learning_rate,learning_rate_decay_steps,learning_rate_decay,momentum,batch_size,epochs,activation_function,dropout_rate,optimizer,model,config,avg_loss,avg_acc
-0,0.0001,500,0.97,0.7,16,15,ReLU,0.2,sgd,<class 'cnn.CNN'>,<class 'cnn_config.CNNConfig'>,0.6580238871276378,0.5107422
-
-1,0.001,500,0.97,0.9,32,15,LeakyReLU,0.5,adam,<class 'cnn.CNN'>,<class 'cnn_config.CNNConfig'>,7.167090791463852,0.53489584
-2,0.0001,200,1.0,0.5,8,15,LeakyReLU,0.2,sgd,<class 'cnn.CNN'>,<class 'cnn_config.CNNConfig'>,0.6288454178969065,0.51583326
-3,0.01,200,0.92,0.9,8,15,ReLU,0.7,sgd,<class 'cnn.CNN'>,<class 'cnn_config.CNNConfig'>,7.642868700027465,0.50333333
-4,0.001,500,0.92,0.9,16,15,LeakyReLU,0.7,sgd,<class 'cnn.CNN'>,<class 'cnn_config.CNNConfig'>,4.0606749471276995,0.515625

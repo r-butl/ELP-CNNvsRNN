@@ -1,0 +1,69 @@
+# Snakemake Configuration for MobileNetV2 vs ResNet18 Experiment
+# Comparing Regular Training, QAT, and PTQ methods
+
+# Experiment parameters
+models:
+  - "mobilenetv2"
+  - "resnet18"
+
+training_methods:
+  - "regular"
+  - "qat"
+
+quantization_methods:
+  - "none"  # for regular training
+  - "ptq"   # for post-training quantization
+
+# Cross-validation parameters
+cross_validation:
+  k_folds: 5
+  max_epochs: 15
+  num_trials: 30
+  max_concurrent_trials: 2
+
+# Hyperparameter search space
+hyperparameters:
+  learning_rate: [0.01, 0.001, 0.0001]
+  learning_rate_decay_steps: [200, 500]
+  learning_rate_decay: [0.92, 0.97, 1.0]
+  momentum: [0.5, 0.7, 0.9]
+  batch_size: [8, 16, 32]
+  epochs: [15]
+  activation_function: ["ReLU", "LeakyReLU"]
+  dropout_rate: [0.2, 0.5, 0.7]
+  optimizer: ["adam", "sgd"]
+
+# Training parameters
+training:
+  patience: 10
+  min_delta: 0.001
+  max_epochs: 300
+
+# Data paths
+data:
+  dataset_folder: "data/spectrogram_cherrypicked"
+  train_file: "train.tfrecord"
+  validate_file: "validate.tfrecord"
+  test_file: "toughset_test.tfrecord"
+
+# Output paths
+output:
+  results_dir: "results"
+  models_dir: "models"
+  logs_dir: "logs"
+  cross_validation_dir: "cross_validation_results"
+
+# Quantization parameters
+quantization:
+  # QAT parameters
+  qat_epochs: 10
+  qat_learning_rate: 0.0001
+  
+  # PTQ parameters
+  ptq_calibration_samples: 100
+  ptq_representative_dataset_size: 200
+
+# Hardware configuration
+hardware:
+  gpu_memory_growth: true
+  mixed_precision: false

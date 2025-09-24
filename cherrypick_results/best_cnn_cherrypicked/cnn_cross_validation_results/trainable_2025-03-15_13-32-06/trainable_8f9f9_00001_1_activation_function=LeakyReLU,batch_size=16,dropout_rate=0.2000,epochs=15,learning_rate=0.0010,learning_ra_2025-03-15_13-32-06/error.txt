@@ -1,8 +1,0 @@
-Failure # 1 (occurred at 2025-03-15_13-43-01)
-The actor died unexpectedly before finishing this task.
-	class_name: ImplicitFunc
-	actor_id: 0ab1674971fc10e1fd0729bc01000000
-	pid: 1826279
-	namespace: 520b906d-2cd1-4cd8-af89-a62215780cbf
-	ip: 198.202.102.154
-The actor is dead because its worker process has died. Worker exit type: SYSTEM_ERROR Worker exit detail: Worker unexpectedly exits with a connection error code 2. End of file. There are some potential root causes. (1) The process is killed by SIGKILL by OOM killer due to high memory usage. (2) ray stop --force is called. (3) The worker is crashed unexpectedly due to SIGSEGV or other unexpected errors.
