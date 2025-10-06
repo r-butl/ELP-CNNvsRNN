@@ -14,7 +14,7 @@ singularity build --sandbox sandbox_container/ /cm/shared/apps/containers/singul
 
 Once the container has been built into a sandbox directory, load the container in a shell:
 ```
-singularity exec --writable sandbox_container/ bash
+singularity exec --writable train-container-sandbox/ /bin/bash
 ```
 
 Now, execute pip to install the necessary packages.
@@ -29,97 +29,143 @@ exit
 
 Now, we have a container we can use for training.
 
-# General Setup
-
-If you dont need to make a container, install all of the necessary python packages into a virtual environment of your choosing.
+To log in directly to the container, use this command:
 ```
-pip install -r requirements.txt
+singularity exec --bind /expanse,/scratch --nv ./train-container-sandbox /bin/bash
 ```
 
-# Data Setup
+# Loading Singularity Modules
 
-The 'data_creation' folder contains all of the necessary scripts to convert the Elephant data from raw 24-hour audio clips, to audio clippings of 5 seconds, to tfrecords of audio with appropriate labels, and finally to the tfrecords of spectrograms. These scripts are only helpful if you have access to the ELP data provided by Cornell.
-
-Cut audio clippings.
+View what modules are available to load:
 ```
-python pos_audio_clips.py
-python neg_audio_clips.py
+module avail
 ```
 
-Convert clips into tfrecords.
+Terminal output:
 ```
-python create_tfrecords.py
+------------------------------------ /cm/shared/apps/spack/0.17.3/cpu/b/share/spack/lmod/linux-rocky8-x86_64/Core ------------------------------------
+   anaconda3/2021.05/q4munrg             gcc/10.2.0/npcyll4          matlab/2022b/lefe4oq         rclone/1.56.2/mldjorr
+   aocc/3.2.0/io3s466                    gh/2.0.0/mkz3uxl            mercurial/5.8/qmgrjvl        sratoolkit/2.10.9/rn4humf
+   aria2/1.35.0/q32jtg2                  git-lfs/2.11.0/kmruniy      nvhpc/21.9/xxpthf5           subversion/1.14.0/qpzq6zs
+   cmake/3.21.4/n5jtjsf                  git/2.31.1/ldetm5y          parallel/20210922/sqru6rr    ucx/1.10.1/wla3unl
+   entrezdirect/10.7.20190114/6pkkpx2    intel/19.1.3.304/6pv46so    pigz/2.6/bgymyil
+--------------------------------------------------------------- /cm/local/modulefiles ----------------------------------------------------------------
+   shared (L)    singularitypro/3.11 (D)    singularitypro/4.1.2    slurm/expanse/23.02.7 (L)
+--------------------------------------------------------- /cm/shared/apps/access/modulefiles ---------------------------------------------------------
+   accessusage/0.5-1    cue-login-env
+--------------------------------------------------------------- /usr/share/modulefiles ---------------------------------------------------------------
+   DefaultModules (L)    cpu/0.15.4 (c)    cpu/0.17.3b (c,L,D)    gpu/0.15.4 (g)    gpu/0.17.3b (g,D)    nostack/0.15.4 (e)    nostack/0.17.3b (e,D)
+--------------------------------------------------------------- /cm/shared/modulefiles ---------------------------------------------------------------
+   AMDuProf/3.4.475    default-environment    sdsc/1.0 (L)    slurm/expanse/23.02.7
+  Where:
+   L:  Module is loaded
+   c:  built natively for AMD Rome
+   e:  not architecture specific
+   g:  built natively for Intel Skylake
+   D:  Default Module
+Module defaults are chosen based on Find First Rules due to Name/Version/Version modules found in the module tree.
+See https://lmod.readthedocs.io/en/latest/060_locating.html for details.
+Use "module spider" to find all possible modules and extensions.
+Use "module keyword key1 key2 ..." to search for all possible modules matching any of the "keys".
 ```
 
-Convert audio tfrecords into spectrograms.
-```
-python convert_audio_to_spec_tfrecords.py
-```
 
-Once you have the directories of the tfrecords for either audio or spectrogram, go into rnn_config.py and cnn_config.py and configure the following parameters to the location of the dataset directory and file names.
+Adds a module to your environment for this session:
 ```
-DATASET_FOLDER = 'audio_tfrecords'
+module add <module>
+``` 
 
-TRAIN_FILE = 'train.tfrecord'
-VALIDATE_FILE = 'validate.tfrecord'
-TEST_FILE = 'test.tfrecord'
+For singularity, you will want to load this one:
+```
+module add singularitypro/3.11
 ```
 
-# Exploration Script
-
-The exploration script 'cross_validation_experiment.py' will apply a variety of hyperparameter combinations on the models and asses performance using 5 fold cross validation. Ray Tune is used to scale up the experiments, running many at a time.  This script can be run using python in the terminal, or queued as a slurm job.
-
-Python in the terminal.
+You can configure module to be loaded at every login:
 ```
-python cross_validation_experiment.py rnn (or cnn)
+echo "module load singularitypro/3.11" >> ~/.bashrc
 ```
 
-Slurm job. To change the model, go into the script and change the final argument in the python call to either (rnn/cnn)
+Viewing loaded modules:
+```
+module list
+```
+
+# Launch a terminal with allocation
+
+Here is an example command you can use to launch a bash terminal with GPU allocation. 
+
+```
+srun --partition=gpu-shared --gpus=1 --pty --account=cso100 --nodes=1 --ntasks-per-node=4 --mem=8G -t 00:30:00 --export=ALL singularity exec --bind /expanse,/scratch,/usr/share/lmod:/usr/share/lmod,/usr/bin/lua:/usr/bin/lua --nv ./train-container-sandbox /bin/bash
+```
+
+# Queueing a Job
+To queue a job to run on the gpu-shared cluster, you will need to define a bash script with the following outline:
+
+```
+#!/usr/bin/env bash
+#SBATCH --job-name=cross_validation_experiment
+####Change account below
+#SBATCH --account=cso100
+#SBATCH --partition=gpu-debug
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=10
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=10G
+#SBATCH --gpus=1
+#SBATCH --time=00:10:00
+#SBATCH --output=%x.o%j.%N
+declare -xr SINGULARITY_MODULE='singularitypro/3.11'
+module purge
+module load "${SINGULARITY_MODULE}"
+module list
+# Check if model type argument is passed
+if [ -z "$1" ]; then
+    echo "Error: No model type specified. Usage: sbatch $0 <cnn|rnn>"
+    exit 1
+fi
+MODEL_TYPE=$1  # Capture model type argument
+export NVIDIA_DISABLE_REQUIRE=true
+time -p singularity exec --bind /expanse,/scratch --nv ./train-container-sandbox python -u ./cross_validation_experiment.py --model "$MODEL_TYPE"
+```
+
+Then you can use this command to schedule it.
 ```
 sbatch scripts/run-cross_validation_experiment-gpu-shared.sh
 ```
 
+*** NOTE: This script is currently not a part of the project, this is just an example. ***
+
+# Testing the Pipeline
+
+After you have loaded the singularity module, made a conda environment, and launched a bash terminal with GPU allocation, you can then procede to test the scripts. The first action is to make the test dataset.
+
+```
+python test_pipeline.py
+```
+
+# Queueing and Viewing Jobs
+
 You can check the status of your job by running:
+
 ```
 squeue -u $USER
 ```
 
-This is an example output of running the previous commmand. The ST column refers to state, in this case the job is pending. When in the running state, the target nodes can be found unnder the Nodelist column.
-```             
-JOBID       PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
-37109179    gpu-debug cross_va lbutler2 PD       0:00      1 (Priority)
+or 
 ```
+squeue | grep $USER
+```
+
+This is an example output of running the previous commmand. The ST column refers to state, in this case the job is pending. When in the running state, the target nodes can be found unnder the Nodelist column.
+
+```
+JOBID    PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
+42897218 gpu-debug     bash lbutler2  R       4:21      1 exp-7-59
+```
+
 
 Check if the script is properly using the GPU, ssh into a node in the Nodelist column.
 ```
 ssh <node>
 nvtop
 ```
-
-# View the results of cross validation
-
-I'm sure there is a better way to do this using ray, however I typically view cross validation results using the following command.
-```
-python view_cross_validation_results.py
-```
-
-The results.csv file created will contain an overview of the configuration and validation loss for each experiment. Choose the best one, then open up the 'train.py' script and adjust the configuration.
-```
-vim train.py
-```
-
-# Train a Model
-
-You can train a model by running the train.py script in one of two ways.
-
-Python in the terminal.
-```
-python train.py cnn (or rnn)
-```
-
-Queueing a slurm job. Again, you'll have to go into the script to change the model type.
-```
-sbatch scripts/run-train-gpu-shared.sh
-```
-
-# Testing
