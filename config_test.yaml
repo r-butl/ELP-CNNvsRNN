@@ -12,57 +12,57 @@ training_methods:
   - "qat"
 
 quantization_methods:
-  - "none"  # for regular training
-  - "ptq"   # for post-training quantization
+  - "none"  
+  - "ptq"  
 
-# Cross-validation parameters (reduced for testing)
+# Cross-validation parameters
 cross_validation:
-  k_folds: 3  # Reduced from 5 for faster testing
-  max_epochs: 5  # Reduced from 15 for faster testing
-  num_trials: 5  # Reduced from 30 for faster testing
-  max_concurrent_trials: 1  # Reduced for testing
+  k_folds: 3  
+  max_epochs: 1 
+  num_trials: 1
+  max_concurrent_trials: 1 
 
-# Hyperparameter search space (reduced for testing)
+# Hyperparameter search space
 hyperparameters:
-  learning_rate: [0.001, 0.0001]  # Reduced options
-  learning_rate_decay_steps: [200]  # Single option
-  learning_rate_decay: [0.97]  # Single option
-  momentum: [0.9]  # Single option
-  batch_size: [8, 16]  # Reduced options
-  epochs: [5]  # Reduced for testing
-  activation_function: ["ReLU"]  # Single option
-  dropout_rate: [0.2]  # Single option
-  optimizer: ["adam"]  # Single option
+  learning_rate: [0.0001] 
+  learning_rate_decay_steps: [200]
+  learning_rate_decay: [0.97] 
+  momentum: [0.9] 
+  batch_size: [16]
+  epochs: [5] 
+  activation_function: ["ReLU"]
+  dropout_rate: [0.2] 
+  optimizer: ["adam"]
 
-# Training parameters (reduced for testing)
+# Training parameters 
 training:
-  patience: 3  # Reduced for testing
+  patience: 3 
   min_delta: 0.001
-  max_epochs: 10  # Reduced for testing
+  max_epochs: 1 
 
 # Data paths (pointing to dummy dataset)
 data:
-  dataset_folder: "data/spectrogram_cherrypicked"
+  dataset_folder: "/home/lbutler2/ELP-CNN-Spectrogram/data/spectrogram_cherrypicked"
   train_file: "train.tfrecord"
   validate_file: "validate.tfrecord"
   test_file: "toughset_test.tfrecord"
 
 # Output paths
 output:
-  results_dir: "results"
-  models_dir: "models"
-  logs_dir: "logs"
-  cross_validation_dir: "cross_validation_results"
+  results_dir: "/home/lbutler2/ELP-CNN-Spectrogram/results"
+  models_dir: "/home/lbutler2/ELP-CNN-Spectrogram/models"
+  logs_dir: "/home/lbutler2/ELP-CNN-Spectrogram/logs"
+  cross_validation_dir: "/home/lbutler2/ELP-CNN-Spectrogram/cross_validation_results/mobilenetv2_cv_results"
 
-# Quantization parameters (reduced for testing)
+# Quantization parameters
 quantization:
   # QAT parameters
-  qat_epochs: 3  # Reduced for testing
+  qat_epochs: 3  
   qat_learning_rate: 0.0001
   
   # PTQ parameters
-  ptq_calibration_samples: 20  # Reduced for testing
-  ptq_representative_dataset_size: 50  # Reduced for testing
+  ptq_calibration_samples: 20 
+  ptq_representative_dataset_size: 50 
 
 # Hardware configuration
 hardware:

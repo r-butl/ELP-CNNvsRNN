@@ -30,6 +30,8 @@ def create_dummy_spectrogram_data(num_samples, height=563, width=98):
         
         # Normalize
         spectrogram = (spectrogram - np.mean(spectrogram)) / np.std(spectrogram)
+        spectrogram = np.expand_dims(spectrogram, axis=-1)   # shape (height, width, 1)
+
         samples.append(spectrogram.astype(np.float32))
         labels.append(label)
     

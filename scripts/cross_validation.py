@@ -12,13 +12,16 @@ from ray import tune
 from ray.tune.search.optuna import OptunaSearch
 import argparse
 import json
-
+print("GPUs detected by TensorFlow:", tf.config.list_physical_devices('GPU'))
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import read_tfrecords, get_tfrecord_length
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
+
+import os
+os.environ["RAY_USE_MULTIPROCESSING_POOL"] = "1"
 
 def k_fold_split(dataset, num_folds, fold_idx):
     """Split dataset into k folds for cross-validation"""
@@ -51,7 +54,8 @@ def trainable_cv(config):
     """Cross-validation training function"""
     with tf.device('/GPU:0'):
         # Load configuration
-        with open('config.yaml', 'r') as f:
+
+        with open(config['config_path'], 'r') as f:
             cfg = yaml.safe_load(f)
         
         # Load dataset
@@ -153,7 +157,10 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    # Initialize Ray
+    if ray.is_initialized():
+        ray.shutdown()  
+   
+   # Initialize Ray
     ray.init(ignore_reinit_error=True)
     
     # Define search space
@@ -174,12 +181,18 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     resources = {"cpu": 1, "gpu": 1}
     
     # Search algorithm
-    search_alg = OptunaSearch()
+    search_alg = OptunaSearch(
+            metric="avg_acc",
+            mode="max"
+            )
     
     # Create tuner
     tuner = tune.Tuner(
         tune.with_resources(trainable_cv, resources),
-        param_space=search_space,
+        param_space={
+            **search_space,
+            "config_path":  os.path.join(os.getcwd(), config_path)
+        },
         tune_config=tune.TuneConfig(
             num_samples=cfg['cross_validation']['num_trials'],
             max_concurrent_trials=cfg['cross_validation']['max_concurrent_trials'],
@@ -196,7 +209,8 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     # Get best result
     best_result = results.get_best_result(metric="avg_acc", mode="max")
     best_config = best_result.config
-    
+
+    print(best_result)
     # Save best configuration
     output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_best_config')
     os.makedirs(output_dir, exist_ok=True)
@@ -208,7 +222,8 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     print(f"Accuracy: {best_result.metrics['avg_acc']:.4f}")
     print(f"Loss: {best_result.metrics['avg_loss']:.4f}")
     print(f"Config: {best_config}")
-    
+  
+    ray.shutdown()
     return best_config
 
 if __name__ == "__main__":

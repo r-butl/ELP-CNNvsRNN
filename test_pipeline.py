@@ -7,20 +7,40 @@ import os
 import subprocess
 import sys
 
+import subprocess
+
 def run_command(command, description):
-    """Run a command and handle errors"""
+    """Run a command and stream output live"""
     print(f"\n🚀 {description}")
     print(f"Running: {command}")
-    
+
     try:
-        result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
-        print(f"✅ {description} completed successfully")
-        if result.stdout:
-            print("Output:", result.stdout)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ {description} failed")
-        print(f"Error: {e.stderr}")
+        # Start the subprocess
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,  # ensures output is string
+            bufsize=1,  # line-buffered
+        )
+
+        # Stream output line by line
+        for line in process.stdout:
+            print(line, end="")  # line already has newline
+
+        process.wait()
+
+        if process.returncode == 0:
+            print(f"✅ {description} completed successfully")
+            return True
+        else:
+            print(f"❌ {description} failed with return code {process.returncode}")
+            return False
+
+    except Exception as e:
+        print(f"❌ {description} encountered an error")
+        print(f"Error: {e}")
         return False
 
 def test_pipeline():

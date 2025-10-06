@@ -6,3 +6,5 @@ core*
 *.swp
 train-container-sandbox/
 *model*
+cross_validation_results/
+data_creation/
