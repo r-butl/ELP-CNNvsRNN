@@ -54,15 +54,19 @@ def trainable_cv(config):
         with open('config.yaml', 'r') as f:
             cfg = yaml.safe_load(f)
         
-        # Load dataset
+        # Load dataset - reload for each fold to avoid consumption issues
         dataset_path = os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file'])
-        training_dataset = read_tfrecords(dataset_path, buffer_size=64000)
         
         # Get input shape
-        for sample, label in training_dataset.take(1):
+        temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
+        for sample, label in temp_dataset.take(1):
             shape = [None] + sample.shape
         
-        dataset_size = sum(1 for _ in training_dataset)
+        # Get dataset size
+        temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
+        dataset_size = sum(1 for _ in temp_dataset)
+        
+        del temp_dataset  # Free memory
         
         # Define learning rate schedule
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
@@ -99,6 +103,9 @@ def trainable_cv(config):
             
             optimizer.build(net.trainable_weights)
             
+            # Reload dataset for this fold to avoid consumption issues
+            training_dataset = read_tfrecords(dataset_path, buffer_size=64000)
+            
             # Split data for this fold
             train_dataset, val_dataset = k_fold_split(training_dataset, cfg['cross_validation']['k_folds'], fold_idx)
             
@@ -132,6 +139,10 @@ def trainable_cv(config):
             
             fold_loss_results.append(validation_loss)
             fold_accuracy_results.append(validation_accuracy)
+            
+            # Clean up memory after each fold
+            del net, optimizer, train_dataset, val_dataset, training_dataset
+            tf.keras.backend.clear_session()
         
         # Average results across folds
         avg_loss = sum(fold_loss_results) / len(fold_loss_results)
@@ -140,11 +151,10 @@ def trainable_cv(config):
         tf.print(f"Model: {config['model_type']} - Avg. Val. Loss: {avg_loss:.4f}, Avg. Val. Acc: {avg_acc:.4f}")
         
         # Report results to Ray Tune
-        tune.report({
-            'config': config,
-            'avg_loss': avg_loss,
-            'avg_acc': avg_acc
-        })
+        tune.report(
+            avg_loss=avg_loss,
+            avg_acc=avg_acc
+        )
 
 def run_cross_validation(model_type, config_path='config.yaml'):
     """Run cross-validation for a specific model type"""
@@ -193,23 +203,35 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     # Run optimization
     results = tuner.fit()
     
-    # Get best result
-    best_result = results.get_best_result(metric="avg_acc", mode="max")
-    best_config = best_result.config
-    
-    # Save best configuration
-    output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_best_config')
-    os.makedirs(output_dir, exist_ok=True)
-    
-    with open(os.path.join(output_dir, 'best_config.json'), 'w') as f:
-        json.dump(best_config, f, indent=2)
-    
-    print(f"Best configuration for {model_type}:")
-    print(f"Accuracy: {best_result.metrics['avg_acc']:.4f}")
-    print(f"Loss: {best_result.metrics['avg_loss']:.4f}")
-    print(f"Config: {best_config}")
-    
-    return best_config
+    # Get best result with error handling
+    try:
+        best_result = results.get_best_result(metric="avg_acc", mode="max")
+        
+        # Check if metrics are available
+        if 'avg_acc' not in best_result.metrics:
+            print(f"ERROR: No valid trials completed for {model_type}. All trials failed.")
+            print("Check for memory issues (OOM) or dataset problems.")
+            return None
+        
+        best_config = best_result.config
+        
+        # Save best configuration
+        output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_best_config')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with open(os.path.join(output_dir, 'best_config.json'), 'w') as f:
+            json.dump(best_config, f, indent=2)
+        
+        print(f"Best configuration for {model_type}:")
+        print(f"Accuracy: {best_result.metrics['avg_acc']:.4f}")
+        print(f"Loss: {best_result.metrics['avg_loss']:.4f}")
+        print(f"Config: {best_config}")
+        
+        return best_config
+    except Exception as e:
+        print(f"ERROR: Failed to get best result for {model_type}: {str(e)}")
+        print("This likely means all trials failed. Check logs for OOM or other errors.")
+        return None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cross-validation for model selection")
