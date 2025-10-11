@@ -111,10 +111,22 @@ def trainable_cv(config):
             # Training loop (use smaller shuffle buffer to reduce memory usage)
             shuffle_buffer = min(1000, dataset_size)
             for epoch in range(config['epochs']):
+                tf.print(f"  Epoch {epoch + 1}/{config['epochs']}")
+                epoch_loss = 0.0
+                num_batches = 0
                 for step, (samples, labels) in enumerate(train_dataset.batch(config['batch_size']).shuffle(buffer_size=shuffle_buffer)):
                     loss = train_step(net, optimizer, loss_fn, samples, labels)
+                    epoch_loss += loss
+                    num_batches += 1
+                    # Print progress every 10 batches
+                    if (step + 1) % 10 == 0:
+                        tf.print(f"    Batch {step + 1}, Loss: {loss:.4f}")
+                
+                avg_epoch_loss = epoch_loss / num_batches
+                tf.print(f"  Epoch {epoch + 1} complete - Avg Loss: {avg_epoch_loss:.4f}")
             
             # Validation
+            tf.print(f"  Running validation...")
             total_loss = 0.0
             total_accuracy = 0.0
             batches = 0
@@ -150,11 +162,8 @@ def trainable_cv(config):
         
         tf.print(f"Model: {config['model_type']} - Avg. Val. Loss: {avg_loss:.4f}, Avg. Val. Acc: {avg_acc:.4f}")
         
-        # Report results to Ray Tune
-        tune.report(
-            avg_loss=avg_loss,
-            avg_acc=avg_acc
-        )
+        # Report results to Ray Tune (using dictionary for compatibility)
+        tune.report({"avg_loss": float(avg_loss), "avg_acc": float(avg_acc)})
 
 def run_cross_validation(model_type, config_path='config.yaml'):
     """Run cross-validation for a specific model type"""
