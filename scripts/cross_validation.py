@@ -225,8 +225,8 @@ def run_cross_validation(model_type, config_path='config.yaml'):
         
         best_config = best_result.config
         
-        # Save best configuration
-        output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_best_config')
+        # Save best configuration (in the same cv_results folder)
+        output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_cv_results', f'{model_type}_best_config')
         os.makedirs(output_dir, exist_ok=True)
         
         with open(os.path.join(output_dir, 'best_config.json'), 'w') as f:

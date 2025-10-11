@@ -35,14 +35,29 @@ def train_step(net, optimizer, loss_fn, samples, labels):
     
     return loss, accuracy
 
-def train_model(model_type, config_path, best_config_path):
+def train_model(model_type, config_path, best_config_path=None):
     """Train a model with the best configuration from cross-validation"""
     
     # Load configuration
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    # Load best configuration
+    # Set default path if not provided
+    if best_config_path is None:
+        best_config_path = os.path.join(
+            cfg['output']['cross_validation_dir'], 
+            f'{model_type}_cv_results',
+            f'{model_type}_best_config',
+            'best_config.json'
+        )
+    
+    # Load best configuration with helpful error message
+    if not os.path.exists(best_config_path):
+        print(f"ERROR: Best config file not found at: {best_config_path}")
+        print(f"Please run cross-validation first using:")
+        print(f"  python scripts/cross_validation.py --model {model_type}")
+        raise FileNotFoundError(f"Best config not found: {best_config_path}")
+    
     with open(best_config_path, 'r') as f:
         best_config = json.load(f)
     
@@ -185,7 +200,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Regular training")
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
     parser.add_argument("--config", default="config.yaml", help="Configuration file")
-    parser.add_argument("--best_config", required=True, help="Path to best configuration from CV")
+    parser.add_argument("--best_config", default=None, help="Path to best configuration from CV (defaults to cross_validation_results/{model}_best_config/best_config.json)")
     
     args = parser.parse_args()
     
