@@ -156,38 +156,49 @@ def train_qat_model(model_type, config_path, best_config_path=None):
     print(f"  Learning rate: {qat_lr} (lower for QAT)")
     print(f"  Early stopping patience: {cfg['training']['patience']}")
     
+    # Clear GPU cache before training (QAT is memory intensive!)
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  ⚠️  QAT requires more memory than regular training")
+    
     best_val_loss = float('inf')
     patience_counter = 0
     training_history = []
     
     for epoch in range(cfg['quantization']['qat_epochs']):
-        # Training phase
-        qat_model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
-        
-        for batch_idx, (inputs, labels) in enumerate(train_loader):
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+        try:
+            # Training phase
+            qat_model.train()
+            train_loss = 0.0
+            train_correct = 0
+            train_total = 0
             
-            # Forward pass
-            optimizer.zero_grad()
-            outputs = qat_model(inputs).squeeze()
-            loss = criterion(outputs, labels)
-            
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-            
-            # Statistics
-            train_loss += loss.item() * inputs.size(0)
-            predictions = (outputs > 0.5).float()
-            train_correct += (predictions == labels).sum().item()
-            train_total += labels.size(0)
-            
-            if batch_idx % 50 == 0:
-                print(f"  Epoch {epoch+1}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}")
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                
+                # Forward pass
+                optimizer.zero_grad()
+                outputs = qat_model(inputs).squeeze()
+                loss = criterion(outputs, labels)
+                
+                # Backward pass
+                loss.backward()
+                optimizer.step()
+                
+                # Statistics
+                train_loss += loss.item() * inputs.size(0)
+                predictions = (outputs > 0.5).float()
+                train_correct += (predictions == labels).sum().item()
+                train_total += labels.size(0)
+                
+                if batch_idx % 50 == 0:
+                    print(f"  Epoch {epoch+1}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}")
+                
+                # Clear GPU memory more frequently for QAT
+                if batch_idx % 25 == 0 and device.type == 'cuda':
+                    torch.cuda.empty_cache()
         
         # Calculate training metrics
         avg_train_loss = train_loss / train_total
@@ -252,10 +263,27 @@ def train_qat_model(model_type, config_path, best_config_path=None):
             patience_counter += 1
             print(f"  No improvement for {patience_counter} epoch(s)")
         
-        # Early stopping
-        if patience_counter >= cfg['training']['patience']:
-            print(f"\nEarly stopping triggered after {epoch+1} epochs")
-            break
+            # Early stopping
+            if patience_counter >= cfg['training']['patience']:
+                print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                break
+                
+        except torch.cuda.OutOfMemoryError:
+            print(f"\n❌ Out of memory error at epoch {epoch+1}")
+            print(f"   QAT requires ~2x more memory than regular training")
+            print(f"   Try reducing batch_size in config (current: {best_config['batch_size']})")
+            print(f"   Current batch_size: {best_config['batch_size']} → Try: {best_config['batch_size']//2}")
+            
+            # Save what we have so far
+            if training_history:
+                csv_file = os.path.join(run_folder, 'qat_training_results_partial.csv')
+                with open(csv_file, 'w', newline='') as f:
+                    writer_csv = csv.DictWriter(f, fieldnames=training_history[0].keys())
+                    writer_csv.writeheader()
+                    writer_csv.writerows(training_history)
+                print(f"   Partial results saved to: {run_folder}")
+            
+            raise
     
     # Convert to quantized model (with error handling)
     print("\n" + "="*60)

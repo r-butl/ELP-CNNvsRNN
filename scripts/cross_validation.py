@@ -98,6 +98,13 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
 def objective(trial, model_type, dataset, input_shape, cfg, device):
     """Optuna objective function for hyperparameter optimization"""
     
+    # Clear any cached memory before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        if hasattr(torch.mps, 'empty_cache'):
+            torch.mps.empty_cache()
+    
     # Sample hyperparameters
     config = {
         'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True),
@@ -111,80 +118,108 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
         'model_type': model_type
     }
     
-    # K-fold cross-validation
-    k_folds = cfg['cross_validation']['k_folds']
-    fold_scores = []
-    
-    for fold_idx in range(k_folds):
-        print(f"\n  Trial {trial.number}, Fold {fold_idx + 1}/{k_folds}")
+    try:
+        # K-fold cross-validation
+        k_folds = cfg['cross_validation']['k_folds']
+        fold_scores = []
         
-        # Split data
-        train_dataset, val_dataset = k_fold_split(dataset, k_folds, fold_idx)
-        
-        # Create data loaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config['batch_size'],
-            shuffle=True,
-            num_workers=0,
-            pin_memory=True
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=config['batch_size'],
-            shuffle=False,
-            num_workers=0,
-            pin_memory=True
-        )
-        
-        # Create model
-        if model_type == 'mobilenetv2':
-            model = MobileNetV2Model(model_config=config, training=True, input_shape=input_shape)
-        elif model_type == 'resnet18':
-            model = ResNet18Model(model_config=config, training=True, input_shape=input_shape)
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
-        
-        model = model.to(device)
-        
-        # Loss function
-        criterion = nn.BCELoss()
-        
-        # Optimizer
-        if config['optimizer'] == 'adam':
-            optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
-        elif config['optimizer'] == 'sgd':
-            optimizer = optim.SGD(
-                model.parameters(),
-                lr=config['learning_rate'],
-                momentum=config['momentum']
+        for fold_idx in range(k_folds):
+            print(f"\n  Trial {trial.number}, Fold {fold_idx + 1}/{k_folds}")
+            
+            # Split data
+            train_dataset, val_dataset = k_fold_split(dataset, k_folds, fold_idx)
+            
+            # Create data loaders
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=config['batch_size'],
+                shuffle=True,
+                num_workers=0,
+                pin_memory=True
             )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=config['batch_size'],
+                shuffle=False,
+                num_workers=0,
+                pin_memory=True
+            )
+            
+            # Create model
+            if model_type == 'mobilenetv2':
+                model = MobileNetV2Model(model_config=config, training=True, input_shape=input_shape)
+            elif model_type == 'resnet18':
+                model = ResNet18Model(model_config=config, training=True, input_shape=input_shape)
+            else:
+                raise ValueError(f"Unknown model type: {model_type}")
+            
+            model = model.to(device)
+            
+            # Loss function
+            criterion = nn.BCELoss()
+            
+            # Optimizer
+            if config['optimizer'] == 'adam':
+                optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+            elif config['optimizer'] == 'sgd':
+                optimizer = optim.SGD(
+                    model.parameters(),
+                    lr=config['learning_rate'],
+                    momentum=config['momentum']
+                )
+            
+            # Learning rate scheduler
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=config['learning_rate_decay_steps'],
+                gamma=config['learning_rate_decay']
+            )
+            
+            # Train and evaluate
+            val_accuracy = train_and_evaluate_fold(
+                model, train_loader, val_loader, optimizer, criterion, device,
+                epochs=cfg['cross_validation']['max_epochs']
+            )
+            
+            fold_scores.append(val_accuracy)
+            print(f"    Fold {fold_idx + 1} Validation Accuracy: {val_accuracy:.4f}")
+            
+            # Clean up GPU memory aggressively
+            del model, train_loader, val_loader, optimizer, scheduler
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache() if hasattr(torch.mps, 'empty_cache') else None
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+    
+        # Return average validation accuracy
+        avg_accuracy = np.mean(fold_scores)
+        print(f"  Trial {trial.number} Average Accuracy: {avg_accuracy:.4f}")
         
-        # Learning rate scheduler
-        scheduler = optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=config['learning_rate_decay_steps'],
-            gamma=config['learning_rate_decay']
-        )
+        return avg_accuracy
         
-        # Train and evaluate
-        val_accuracy = train_and_evaluate_fold(
-            model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=cfg['cross_validation']['max_epochs']
-        )
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"  ⚠️  Trial {trial.number} failed with OOM error")
+        print(f"     Batch size was: {config['batch_size']}")
+        print(f"     Suggest reducing batch_size in config.yaml")
         
-        fold_scores.append(val_accuracy)
-        print(f"    Fold {fold_idx + 1} Validation Accuracy: {val_accuracy:.4f}")
+        # Clean up and retry with smaller batch if possible
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
+        # Raise to let Optuna handle it
+        raise optuna.exceptions.TrialPruned("OOM - suggest smaller batch_size")
+    
+    except Exception as e:
+        print(f"  ⚠️  Trial {trial.number} failed with error: {e}")
         # Clean up
-        del model, train_loader, val_loader, optimizer
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    
-    # Return average validation accuracy
-    avg_accuracy = np.mean(fold_scores)
-    print(f"  Trial {trial.number} Average Accuracy: {avg_accuracy:.4f}")
-    
-    return avg_accuracy
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise
 
 
 def run_cross_validation(model_type, config_path='config.yaml'):
@@ -233,12 +268,26 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     print(f"K-folds: {cfg['cross_validation']['k_folds']}")
     print(f"Max epochs per fold: {cfg['cross_validation']['max_epochs']}")
     
-    # Run optimization
-    study.optimize(
-        lambda trial: objective(trial, model_type, dataset, input_shape, cfg, device),
-        n_trials=cfg['cross_validation']['num_trials'],
-        show_progress_bar=True
-    )
+    # Run optimization with exception handling
+    try:
+        study.optimize(
+            lambda trial: objective(trial, model_type, dataset, input_shape, cfg, device),
+            n_trials=cfg['cross_validation']['num_trials'],
+            show_progress_bar=True,
+            catch=(torch.cuda.OutOfMemoryError,)  # Continue on OOM errors
+        )
+    except KeyboardInterrupt:
+        print("\n⚠️  Optimization interrupted by user")
+        print("   Saving best results found so far...")
+    
+    # Check if we have any successful trials
+    if len(study.trials) == 0 or len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]) == 0:
+        print("\n❌ No trials completed successfully!")
+        print("   Possible issues:")
+        print("   1. Batch size too large - reduce in config.yaml")
+        print("   2. GPU memory too small - try CPU or smaller model")
+        print("   3. Input data too large - check data dimensions")
+        raise RuntimeError("Cross-validation failed - no successful trials")
     
     # Get best hyperparameters
     best_params = study.best_params
