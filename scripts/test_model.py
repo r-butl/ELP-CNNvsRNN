@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""
+Model testing and evaluation script for PyTorch models
+Supports regular, QAT, and PTQ models
+"""
+
+import os
+import sys
+import yaml
+import json
+import torch
+import torch.nn as nn
+import numpy as np
+import argparse
+import csv
+from datetime import datetime
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, roc_curve, precision_recall_curve
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils import read_tfrecords, create_dataloader
+from models.mobilenetv2_model import MobileNetV2Model
+from models.resnet18_model import ResNet18Model
+
+
+def get_device():
+    """Get available device"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
+
+def evaluate_model(model_type, model_path, config_path, test_type="regular"):
+    """Evaluate a trained model on test data"""
+    
+    # Load configuration
+    with open(config_path, 'r') as f:
+        cfg = yaml.safe_load(f)
+    
+    # Load model configuration
+    config_file = os.path.join(model_path, 'model_config.json')
+    if not os.path.exists(config_file):
+        config_file = os.path.join(model_path, 'qat_model_config.json')
+    
+    with open(config_file, 'r') as f:
+        model_config = json.load(f)
+    
+    # Create output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_folder = f"test_results_{model_type}_{test_type}_{timestamp}"
+    os.makedirs(results_folder, exist_ok=True)
+    
+    # Load test dataset
+    print("\nLoading test dataset...")
+    test_dataset = read_tfrecords(
+        os.path.join(cfg['data']['dataset_folder'], cfg['data']['test_file']), 
+        buffer_size=64000
+    )
+    
+    test_loader = create_dataloader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True
+    )
+    
+    # Get input shape from first sample
+    sample, label = test_dataset[0]
+    input_shape = tuple(sample.shape[1:]) + (sample.shape[0],)  # Convert (C, H, W) to (H, W, C) for config
+    
+    print(f"Test dataset size: {len(test_dataset)}")
+    print(f"Input shape (HWC format): {input_shape}")
+    
+    # Get device
+    device = get_device()
+    print(f"Using device: {device}")
+    
+    # Load model based on test type
+    print(f"\nLoading {test_type} model...")
+    if test_type == "regular":
+        if model_type == 'mobilenetv2':
+            model = MobileNetV2Model(
+                model_config=model_config,
+                training=False,
+                input_shape=input_shape
+            )
+        elif model_type == 'resnet18':
+            model = ResNet18Model(
+                model_config=model_config,
+                training=False,
+                input_shape=input_shape
+            )
+        
+        weights_path = os.path.join(model_path, f'{model_type}_model_best.pth')
+        if not os.path.exists(weights_path):
+            weights_path = os.path.join(model_path, f'{model_type}_model_final_weights.pth')
+        
+        model.load_state_dict(torch.load(weights_path, map_location=device))
+        model = model.to(device)
+        
+    elif test_type == "qat":
+        # Load QAT model (before final quantization)
+        if model_type == 'mobilenetv2':
+            model = MobileNetV2Model(
+                model_config=model_config,
+                training=False,
+                input_shape=input_shape
+            )
+        elif model_type == 'resnet18':
+            model = ResNet18Model(
+                model_config=model_config,
+                training=False,
+                input_shape=input_shape
+            )
+        
+        weights_path = os.path.join(model_path, f'{model_type}_qat_model_best.pth')
+        if not os.path.exists(weights_path):
+            weights_path = os.path.join(model_path, f'{model_type}_qat_model_final_weights.pth')
+        
+        model.load_state_dict(torch.load(weights_path, map_location=device))
+        model = model.to(device)
+        
+    elif test_type == "ptq":
+        # Load fully quantized model
+        quantized_path = os.path.join(model_path, f'{model_type}_quantized_model_complete.pth')
+        model = torch.load(quantized_path, map_location=device)
+        model = model.to(device)
+    
+    model.eval()
+    
+    # Collect predictions and true labels
+    predictions = []
+    true_labels = []
+    
+    print(f"\nEvaluating {model_type} {test_type} model...")
+    
+    with torch.no_grad():
+        for batch_idx, (inputs, labels) in enumerate(test_loader):
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            outputs = model(inputs).squeeze()
+            
+            # Handle single sample case
+            if outputs.dim() == 0:
+                outputs = outputs.unsqueeze(0)
+                labels = labels.unsqueeze(0)
+            
+            predictions.extend(outputs.cpu().numpy().tolist())
+            true_labels.extend(labels.cpu().numpy().tolist())
+            
+            if batch_idx % 10 == 0:
+                print(f"  Processed batch {batch_idx}/{len(test_loader)}")
+    
+    # Convert to numpy arrays
+    predictions = np.array(predictions)
+    true_labels = np.array(true_labels)
+    
+    # Calculate binary predictions
+    binary_predictions = (predictions > 0.5).astype(int)
+    
+    # Calculate metrics
+    accuracy = accuracy_score(true_labels, binary_predictions)
+    precision = precision_score(true_labels, binary_predictions, zero_division=0)
+    recall = recall_score(true_labels, binary_predictions, zero_division=0)
+    f1 = f1_score(true_labels, binary_predictions, zero_division=0)
+    
+    # Check if we have both classes for AUC calculation
+    if len(np.unique(true_labels)) > 1:
+        auc = roc_auc_score(true_labels, predictions)
+    else:
+        auc = 0.0
+        print("Warning: Only one class present in test data, AUC set to 0.0")
+    
+    # Confusion matrix
+    cm = confusion_matrix(true_labels, binary_predictions)
+    
+    # Create visualizations
+    plt.figure(figsize=(15, 5))
+    
+    # Confusion Matrix
+    plt.subplot(1, 3, 1)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title(f'Confusion Matrix - {model_type} {test_type}')
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    
+    # ROC Curve
+    plt.subplot(1, 3, 2)
+    if len(np.unique(true_labels)) > 1:
+        fpr, tpr, _ = roc_curve(true_labels, predictions)
+        plt.plot(fpr, tpr, label=f'AUC = {auc:.3f}')
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'ROC Curve - {model_type} {test_type}')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'Insufficient data for ROC', ha='center', va='center')
+        plt.title(f'ROC Curve - {model_type} {test_type}')
+    
+    # Precision-Recall Curve
+    plt.subplot(1, 3, 3)
+    if len(np.unique(true_labels)) > 1:
+        precision_curve, recall_curve, _ = precision_recall_curve(true_labels, predictions)
+        plt.plot(recall_curve, precision_curve)
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title(f'Precision-Recall Curve - {model_type} {test_type}')
+    else:
+        plt.text(0.5, 0.5, 'Insufficient data for PR curve', ha='center', va='center')
+        plt.title(f'Precision-Recall Curve - {model_type} {test_type}')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_folder, f'{model_type}_{test_type}_evaluation.png'))
+    plt.close()
+    
+    # Save detailed results
+    results = {
+        'model_type': model_type,
+        'test_type': test_type,
+        'metrics': {
+            'accuracy': float(accuracy),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1_score': float(f1),
+            'auc': float(auc)
+        },
+        'confusion_matrix': cm.tolist(),
+        'num_samples': len(true_labels)
+    }
+    
+    # Save results to JSON
+    with open(os.path.join(results_folder, 'evaluation_results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    # Save predictions to CSV
+    predictions_data = list(zip(true_labels, predictions, binary_predictions))
+    with open(os.path.join(results_folder, 'predictions.csv'), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['true_label', 'prediction_prob', 'prediction_binary'])
+        writer.writerows(predictions_data)
+    
+    # Print summary
+    print(f"\n{'='*50}")
+    print(f"Evaluation Results for {model_type} {test_type}")
+    print(f"{'='*50}")
+    print(f"Accuracy:  {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1 Score:  {f1:.4f}")
+    print(f"AUC:       {auc:.4f}")
+    print(f"{'='*50}")
+    print(f"Results saved to: {results_folder}")
+    
+    return results_folder, results
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Model testing and evaluation with PyTorch")
+    parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
+    parser.add_argument("--model_path", required=True, help="Path to trained model directory")
+    parser.add_argument("--test_type", choices=["regular", "qat", "ptq"], required=True, help="Type of model to test")
+    parser.add_argument("--config", default="config.yaml", help="Configuration file")
+    
+    args = parser.parse_args()
+    
+    # Run evaluation
+    results_folder, results = evaluate_model(args.model, args.model_path, args.config, args.test_type)
+    print(f"\n✅ Evaluation completed. Results folder: {results_folder}")
