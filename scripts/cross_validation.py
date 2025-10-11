@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cross-validation script for hyperparameter selection using Optuna
-PyTorch implementation
+PyTorch implementation with gradient accumulation and TensorFlow-like memory management
 """
 
 import os
@@ -15,6 +15,9 @@ import json
 import optuna
 from torch.utils.data import DataLoader, Subset
 import numpy as np
+
+# Configure PyTorch to use TensorFlow-like memory management
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,25 +58,42 @@ def k_fold_split(dataset, num_folds, fold_idx):
     return train_dataset, val_dataset
 
 
-def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterion, device, epochs=15):
-    """Train model on one fold and return validation accuracy"""
+def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterion, device, epochs=15, accumulation_steps=8):
+    """
+    Train model on one fold and return validation accuracy
+    Uses gradient accumulation to simulate larger batch sizes
+    
+    Args:
+        accumulation_steps: Number of batches to accumulate (default 8)
+                          effective_batch = actual_batch * accumulation_steps
+                          e.g., batch=4 * accum=8 = effective batch of 32
+    """
     
     for epoch in range(epochs):
         # Training
         model.train()
         train_loss = 0.0
         
-        for inputs, labels in train_loader:
+        optimizer.zero_grad()  # Zero gradients at start
+        
+        for batch_idx, (inputs, labels) in enumerate(train_loader):
             inputs = inputs.to(device)
             labels = labels.to(device)
             
-            optimizer.zero_grad()
+            # Forward pass
             outputs = model(inputs).squeeze()
             loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
             
-            train_loss += loss.item() * inputs.size(0)
+            # Scale loss for gradient accumulation
+            loss = loss / accumulation_steps
+            loss.backward()
+            
+            # Update weights every accumulation_steps batches
+            if (batch_idx + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            train_loss += loss.item() * inputs.size(0) * accumulation_steps
         
         # Validation
         model.eval()
@@ -111,7 +131,7 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
         'learning_rate_decay_steps': trial.suggest_categorical('learning_rate_decay_steps', [100, 200, 500]),
         'learning_rate_decay': trial.suggest_categorical('learning_rate_decay', [0.9, 0.95, 0.97, 1.0]),
         'momentum': trial.suggest_categorical('momentum', [0.5, 0.7, 0.9]),
-        'batch_size': trial.suggest_categorical('batch_size', [8, 16, 32]),
+        'batch_size': trial.suggest_categorical('batch_size', [2, 4]),
         'dropout_rate': trial.suggest_categorical('dropout_rate', [0.1, 0.2, 0.3, 0.5]),
         'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU']),
         'optimizer': trial.suggest_categorical('optimizer', ['adam', 'sgd']),
@@ -175,11 +195,14 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
                 gamma=config['learning_rate_decay']
             )
             
-            # Train and evaluate
-            val_accuracy = train_and_evaluate_fold(
-                model, train_loader, val_loader, optimizer, criterion, device,
-                epochs=cfg['cross_validation']['max_epochs']
-            )
+        # Train and evaluate with gradient accumulation
+        # Effective batch = config['batch_size'] * 8
+        # e.g., batch=4 * 8 = effective batch of 32 (like TensorFlow!)
+        val_accuracy = train_and_evaluate_fold(
+            model, train_loader, val_loader, optimizer, criterion, device,
+            epochs=cfg['cross_validation']['max_epochs'],
+            accumulation_steps=8
+        )
             
             fold_scores.append(val_accuracy)
             print(f"    Fold {fold_idx + 1} Validation Accuracy: {val_accuracy:.4f}")
@@ -214,8 +237,28 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
         # Raise to let Optuna handle it
         raise optuna.exceptions.TrialPruned("OOM - suggest smaller batch_size")
     
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "CUDA" in error_msg or "CUBLAS" in error_msg:
+            print(f"  ⚠️  Trial {trial.number} failed with CUDA error")
+            print(f"     Error: {error_msg[:100]}")
+            print(f"     GPU state may be corrupted after OOM errors")
+            print(f"     Suggestion: Restart the script or reduce batch_size further")
+            
+            # Try to reset GPU state
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Prune this trial and continue
+            raise optuna.exceptions.TrialPruned(f"CUDA error: {error_msg[:50]}")
+        else:
+            # Other runtime errors - let them fail
+            print(f"  ⚠️  Trial {trial.number} failed with error: {e}")
+            raise
+    
     except Exception as e:
-        print(f"  ⚠️  Trial {trial.number} failed with error: {e}")
+        print(f"  ⚠️  Trial {trial.number} failed with unexpected error: {e}")
         # Clean up
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -232,6 +275,13 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     # Get device
     device = get_device()
     print(f"Using device: {device}")
+    
+    # Configure memory management
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Using TensorFlow-like memory management")
+        print(f"Gradient accumulation: enabled (effective batch = actual_batch × 8)")
     
     # Prepare dataset
     dataset_path = os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file'])
@@ -274,7 +324,7 @@ def run_cross_validation(model_type, config_path='config.yaml'):
             lambda trial: objective(trial, model_type, dataset, input_shape, cfg, device),
             n_trials=cfg['cross_validation']['num_trials'],
             show_progress_bar=True,
-            catch=(torch.cuda.OutOfMemoryError,)  # Continue on OOM errors
+            catch=(torch.cuda.OutOfMemoryError, RuntimeError)  # Continue on OOM and CUDA errors
         )
     except KeyboardInterrupt:
         print("\n⚠️  Optimization interrupted by user")

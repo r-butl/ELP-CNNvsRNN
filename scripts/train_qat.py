@@ -2,6 +2,7 @@
 """
 Quantization Aware Training (QAT) script for PyTorch models
 Supports MobileNetV2 and ResNet18 with QAT
+With gradient accumulation and TensorFlow-like memory management
 """
 
 import os
@@ -15,6 +16,10 @@ import argparse
 from datetime import datetime
 import csv
 from torch.utils.tensorboard import SummaryWriter
+
+# Configure PyTorch to use TensorFlow-like memory management
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
+
 try:
     from torch.ao.quantization import prepare_qat, convert
 except ImportError:
@@ -160,11 +165,14 @@ def train_qat_model(model_type, config_path, best_config_path=None):
     if device.type == 'cuda':
         torch.cuda.empty_cache()
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  Using TensorFlow-like memory management")
+        print(f"  Gradient accumulation: 8× (effective batch = {best_config['batch_size']} × 8 = {best_config['batch_size'] * 8})")
         print(f"  ⚠️  QAT requires more memory than regular training")
     
     best_val_loss = float('inf')
     patience_counter = 0
     training_history = []
+    accumulation_steps = 8  # Simulate larger batches
     
     for epoch in range(cfg['quantization']['qat_epochs']):
         try:
@@ -174,27 +182,33 @@ def train_qat_model(model_type, config_path, best_config_path=None):
             train_correct = 0
             train_total = 0
             
+            optimizer.zero_grad()  # Zero gradients at start
+            
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 inputs = inputs.to(device)
                 labels = labels.to(device)
                 
                 # Forward pass
-                optimizer.zero_grad()
                 outputs = qat_model(inputs).squeeze()
                 loss = criterion(outputs, labels)
                 
-                # Backward pass
+                # Scale loss for gradient accumulation
+                loss = loss / accumulation_steps
                 loss.backward()
-                optimizer.step()
                 
-                # Statistics
-                train_loss += loss.item() * inputs.size(0)
+                # Update weights every accumulation_steps batches
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
+                # Statistics (unscale loss for logging)
+                train_loss += loss.item() * inputs.size(0) * accumulation_steps
                 predictions = (outputs > 0.5).float()
                 train_correct += (predictions == labels).sum().item()
                 train_total += labels.size(0)
                 
                 if batch_idx % 50 == 0:
-                    print(f"  Epoch {epoch+1}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}")
+                    print(f"  Epoch {epoch+1}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item() * accumulation_steps:.4f}")
                 
                 # Clear GPU memory more frequently for QAT
                 if batch_idx % 25 == 0 and device.type == 'cuda':
