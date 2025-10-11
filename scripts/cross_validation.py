@@ -195,14 +195,14 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
                 gamma=config['learning_rate_decay']
             )
             
-        # Train and evaluate with gradient accumulation
-        # Effective batch = config['batch_size'] * 8
-        # e.g., batch=4 * 8 = effective batch of 32 (like TensorFlow!)
-        val_accuracy = train_and_evaluate_fold(
-            model, train_loader, val_loader, optimizer, criterion, device,
-            epochs=cfg['cross_validation']['max_epochs'],
-            accumulation_steps=8
-        )
+            # Train and evaluate with gradient accumulation
+            # Effective batch = config['batch_size'] * 8
+            # e.g., batch=4 * 8 = effective batch of 32 (like TensorFlow!)
+            val_accuracy = train_and_evaluate_fold(
+                model, train_loader, val_loader, optimizer, criterion, device,
+                epochs=cfg['cross_validation']['max_epochs'],
+                accumulation_steps=8
+            )
             
             fold_scores.append(val_accuracy)
             print(f"    Fold {fold_idx + 1} Validation Accuracy: {val_accuracy:.4f}")
@@ -218,7 +218,7 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
             # Force garbage collection
             import gc
             gc.collect()
-    
+        
         # Return average validation accuracy
         avg_accuracy = np.mean(fold_scores)
         print(f"  Trial {trial.number} Average Accuracy: {avg_accuracy:.4f}")
