@@ -205,70 +205,70 @@ def train_model(model_type, config_path, best_config_path=None):
                 # Clear some memory periodically
                 if batch_idx % 50 == 0 and device.type == 'cuda':
                     torch.cuda.empty_cache()
-        
-        # Calculate training metrics
-        avg_train_loss = train_loss / train_total
-        train_accuracy = train_correct / train_total
-        
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-        
-        with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
-                
-                outputs = model(inputs).squeeze()
-                loss = criterion(outputs, labels)
-                
-                val_loss += loss.item() * inputs.size(0)
-                predictions = (outputs > 0.5).float()
-                val_correct += (predictions == labels).sum().item()
-                val_total += labels.size(0)
-        
-        # Calculate validation metrics
-        avg_val_loss = val_loss / val_total
-        val_accuracy = val_correct / val_total
-        
-        # Step scheduler
-        scheduler.step()
-        
-        # Log metrics
-        print(f"Epoch {epoch+1}/{cfg['training']['max_epochs']} - "
-              f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f} - "
-              f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
-        
-        # TensorBoard logging
-        writer.add_scalar('Loss/train', avg_train_loss, epoch)
-        writer.add_scalar('Loss/val', avg_val_loss, epoch)
-        writer.add_scalar('Accuracy/train', train_accuracy, epoch)
-        writer.add_scalar('Accuracy/val', val_accuracy, epoch)
-        writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
-        
-        # Save training history
-        training_history.append({
-            'epoch': epoch + 1,
-            'train_loss': avg_train_loss,
-            'train_accuracy': train_accuracy,
-            'val_loss': avg_val_loss,
-            'val_accuracy': val_accuracy,
-            'learning_rate': optimizer.param_groups[0]['lr']
-        })
-        
-        # Check for improvement
-        if avg_val_loss < best_val_loss - cfg['training']['min_delta']:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            # Save best model
-            torch.save(model.state_dict(), os.path.join(run_folder, f'{model_type}_model_best.pth'))
-            print(f"  ✓ Saved best model (val_loss: {best_val_loss:.4f})")
-        else:
-            patience_counter += 1
-            print(f"  No improvement for {patience_counter} epoch(s)")
-        
+            
+            # Calculate training metrics
+            avg_train_loss = train_loss / train_total
+            train_accuracy = train_correct / train_total
+            
+            # Validation phase
+            model.eval()
+            val_loss = 0.0
+            val_correct = 0
+            val_total = 0
+            
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    inputs = inputs.to(device)
+                    labels = labels.to(device)
+                    
+                    outputs = model(inputs).squeeze()
+                    loss = criterion(outputs, labels)
+                    
+                    val_loss += loss.item() * inputs.size(0)
+                    predictions = (outputs > 0.5).float()
+                    val_correct += (predictions == labels).sum().item()
+                    val_total += labels.size(0)
+            
+            # Calculate validation metrics
+            avg_val_loss = val_loss / val_total
+            val_accuracy = val_correct / val_total
+            
+            # Step scheduler
+            scheduler.step()
+            
+            # Log metrics
+            print(f"Epoch {epoch+1}/{cfg['training']['max_epochs']} - "
+                  f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f} - "
+                  f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+            
+            # TensorBoard logging
+            writer.add_scalar('Loss/train', avg_train_loss, epoch)
+            writer.add_scalar('Loss/val', avg_val_loss, epoch)
+            writer.add_scalar('Accuracy/train', train_accuracy, epoch)
+            writer.add_scalar('Accuracy/val', val_accuracy, epoch)
+            writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+            
+            # Save training history
+            training_history.append({
+                'epoch': epoch + 1,
+                'train_loss': avg_train_loss,
+                'train_accuracy': train_accuracy,
+                'val_loss': avg_val_loss,
+                'val_accuracy': val_accuracy,
+                'learning_rate': optimizer.param_groups[0]['lr']
+            })
+            
+            # Check for improvement
+            if avg_val_loss < best_val_loss - cfg['training']['min_delta']:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                # Save best model
+                torch.save(model.state_dict(), os.path.join(run_folder, f'{model_type}_model_best.pth'))
+                print(f"  ✓ Saved best model (val_loss: {best_val_loss:.4f})")
+            else:
+                patience_counter += 1
+                print(f"  No improvement for {patience_counter} epoch(s)")
+            
             # Early stopping
             if patience_counter >= cfg['training']['patience']:
                 print(f"\nEarly stopping triggered after {epoch+1} epochs")
