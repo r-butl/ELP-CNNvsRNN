@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Cross-validation script for hyperparameter selection
+Cross-validation script for hyperparameter selection using Keras Tuner
 """
 
 import os
 import sys
 import yaml
 import tensorflow as tf
-import ray
-from ray import tune
-from ray.tune.search.optuna import OptunaSearch
+import keras_tuner as kt
 import argparse
 import json
 
@@ -34,40 +32,39 @@ def k_fold_split(dataset, num_folds, fold_idx, dataset_size):
     
     return train_dataset, val_dataset
 
-@tf.function
-def train_step(net, optimizer, loss_fn, samples, labels):
-    """Single training step"""
-    with tf.GradientTape() as tape:
-        predictions = net(samples, training=True)
-        loss = loss_fn(labels, predictions)
+class ModelHyperModel(kt.HyperModel):
+    """Hypermodel for Keras Tuner with cross-validation"""
     
-    gradients = tape.gradient(loss, net.trainable_weights)
-    optimizer.apply_gradients(zip(gradients, net.trainable_weights))
-    
-    return loss
-
-def trainable_cv(config):
-    """Cross-validation training function"""
-    with tf.device('/GPU:0'):
-        # Load configuration
-        with open('config.yaml', 'r') as f:
-            cfg = yaml.safe_load(f)
+    def __init__(self, model_type, config_path, dataset_path, input_shape, dataset_size, k_folds):
+        self.model_type = model_type
+        self.config_path = config_path
+        self.dataset_path = dataset_path
+        self.input_shape = input_shape
+        self.dataset_size = dataset_size
+        self.k_folds = k_folds
         
-        # Load dataset - reload for each fold to avoid consumption issues
-        dataset_path = os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file'])
+    def build(self, hp):
+        """Build model with hyperparameters"""
+        # Define hyperparameters
+        config = {
+            'model_type': self.model_type,
+            'learning_rate': hp.Choice('learning_rate', values=[0.001, 0.0001, 0.00001]),
+            'learning_rate_decay_steps': hp.Choice('learning_rate_decay_steps', values=[100, 200, 500]),
+            'learning_rate_decay': hp.Choice('learning_rate_decay', values=[0.9, 0.95, 0.97]),
+            'momentum': hp.Choice('momentum', values=[0.9, 0.95]),
+            'batch_size': hp.Choice('batch_size', values=[16, 32, 64]),
+            'dropout_rate': hp.Choice('dropout_rate', values=[0.1, 0.2, 0.3]),
+            'activation_function': hp.Choice('activation_function', values=['ReLU', 'LeakyReLU']),
+            'optimizer': hp.Choice('optimizer', values=['adam', 'sgd'])
+        }
         
-        # Get input shape
-        temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
-        for sample, label in temp_dataset.take(1):
-            shape = [None] + sample.shape
+        # Create model
+        if self.model_type == 'mobilenetv2':
+            model = MobileNetV2Model(model_config=config, training=True, input_shape=self.input_shape)
+        elif self.model_type == 'resnet18':
+            model = ResNet18Model(model_config=config, training=True, input_shape=self.input_shape)
         
-        # Get dataset size
-        temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
-        dataset_size = sum(1 for _ in temp_dataset)
-        
-        del temp_dataset  # Free memory
-        
-        # Define learning rate schedule
+        # Learning rate schedule
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=config['learning_rate'],
             decay_steps=config['learning_rate_decay_steps'],
@@ -75,173 +72,143 @@ def trainable_cv(config):
             staircase=True
         )
         
-        # Loss function
-        loss_fn = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+        # Optimizer
+        if config['optimizer'] == 'adam':
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        else:
+            optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=config['momentum'])
         
-        # Store results
-        fold_loss_results = []
-        fold_accuracy_results = []
+        # Compile
+        model.compile(
+            optimizer=optimizer,
+            loss=tf.keras.losses.BinaryCrossentropy(from_logits=False),
+            metrics=['accuracy']
+        )
         
-        # Iterate through folds
-        for fold_idx in range(cfg['cross_validation']['k_folds']):
-            tf.print(f"Starting fold {fold_idx + 1}")
+        return model
+    
+    def fit(self, hp, model, *args, **kwargs):
+        """Custom fit with k-fold cross-validation"""
+        batch_size = hp.get('batch_size')
+        
+        fold_scores = []
+        for fold_idx in range(self.k_folds):
+            print(f"\nFold {fold_idx + 1}/{self.k_folds}")
             
-            # Create fresh model for each fold
-            if config['model_type'] == 'mobilenetv2':
-                net = MobileNetV2Model(model_config=config, training=True, input_shape=shape[1:])
-            elif config['model_type'] == 'resnet18':
-                net = ResNet18Model(model_config=config, training=True, input_shape=shape[1:])
+            # Load and split dataset
+            training_dataset = read_tfrecords(self.dataset_path, buffer_size=64000)
+            train_dataset, val_dataset = k_fold_split(training_dataset, self.k_folds, fold_idx, self.dataset_size)
             
-            net.build(shape)
+            # Prepare datasets
+            shuffle_buffer = min(1000, self.dataset_size)
+            train_batches = train_dataset.shuffle(shuffle_buffer).batch(batch_size).repeat()
+            val_batches = val_dataset.batch(batch_size)
             
-            # Optimizer
-            if config["optimizer"] == "adam":
-                optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-            elif config["optimizer"] == "sgd":
-                optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=config["momentum"])
+            # Calculate steps
+            train_fold_size = self.dataset_size * (self.k_folds - 1) // self.k_folds
+            steps_per_epoch = (train_fold_size + batch_size - 1) // batch_size
             
-            optimizer.build(net.trainable_weights)
+            # Train
+            history = model.fit(
+                train_batches,
+                steps_per_epoch=steps_per_epoch,
+                validation_data=val_batches,
+                verbose=1,
+                **kwargs
+            )
             
-            # Reload dataset for this fold to avoid consumption issues
-            training_dataset = read_tfrecords(dataset_path, buffer_size=64000)
+            # Store validation accuracy
+            fold_scores.append(history.history['val_accuracy'][-1])
             
-            # Split data for this fold
-            train_dataset, val_dataset = k_fold_split(training_dataset, cfg['cross_validation']['k_folds'], fold_idx, dataset_size)
-            
-            # Training loop (use smaller shuffle buffer to reduce memory usage)
-            shuffle_buffer = min(1000, dataset_size)
-            for epoch in range(config['epochs']):
-                tf.print(f"  Epoch {epoch + 1}/{config['epochs']}")
-                epoch_loss = 0.0
-                num_batches = 0
-                for step, (samples, labels) in enumerate(train_dataset.batch(config['batch_size']).shuffle(buffer_size=shuffle_buffer)):
-                    loss = train_step(net, optimizer, loss_fn, samples, labels)
-                    epoch_loss += loss
-                    num_batches += 1
-                    # Print progress every 10 batches
-                    if (step + 1) % 10 == 0:
-                        tf.print(f"    Batch {step + 1}, Loss: {loss:.4f}")
-                
-                avg_epoch_loss = epoch_loss / num_batches
-                tf.print(f"  Epoch {epoch + 1} complete - Avg Loss: {avg_epoch_loss:.4f}")
-            
-            # Validation
-            tf.print(f"  Running validation...")
-            total_loss = 0.0
-            total_accuracy = 0.0
-            batches = 0
-            
-            for samples, labels in val_dataset.batch(config['batch_size']):
-                predictions = net(samples, training=False)
-                loss = loss_fn(labels, predictions)
-                
-                # Calculate accuracy
-                pred_classes = tf.cast(predictions > 0.5, dtype=tf.int32)
-                correct_predictions = tf.equal(pred_classes, tf.cast(labels, tf.int32))
-                
-                total_accuracy += tf.reduce_mean(tf.cast(correct_predictions, tf.float32))
-                total_loss += loss.numpy()
-                batches += 1
-            
-            # Compute validation metrics
-            validation_loss = total_loss / batches
-            validation_accuracy = total_accuracy / batches
-            
-            tf.print(f"Fold {fold_idx + 1} - Validation loss: {validation_loss:.4f}, Accuracy: {validation_accuracy:.4f}")
-            
-            fold_loss_results.append(validation_loss)
-            fold_accuracy_results.append(validation_accuracy)
-            
-            # Clean up memory after each fold
-            del net, optimizer, train_dataset, val_dataset, training_dataset
+            # Clean up
+            del training_dataset, train_dataset, val_dataset
             tf.keras.backend.clear_session()
         
-        # Average results across folds
-        avg_loss = sum(fold_loss_results) / len(fold_loss_results)
-        avg_acc = sum(fold_accuracy_results) / len(fold_accuracy_results)
-        
-        tf.print(f"Model: {config['model_type']} - Avg. Val. Loss: {avg_loss:.4f}, Avg. Val. Acc: {avg_acc:.4f}")
-        
-        # Report results to Ray Tune (using dictionary for compatibility)
-        tune.report({"avg_loss": float(avg_loss), "avg_acc": float(avg_acc)})
+        # Return average validation accuracy
+        return {'val_accuracy': sum(fold_scores) / len(fold_scores)}
 
 def run_cross_validation(model_type, config_path='config.yaml'):
-    """Run cross-validation for a specific model type"""
+    """Run cross-validation for a specific model type using Keras Tuner"""
     
     # Load configuration
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    # Initialize Ray
-    ray.init(ignore_reinit_error=True)
+    # Prepare dataset info
+    dataset_path = os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file'])
     
-    # Define search space
-    search_space = {
-        "learning_rate": tune.choice(cfg['hyperparameters']['learning_rate']),
-        "learning_rate_decay_steps": tune.choice(cfg['hyperparameters']['learning_rate_decay_steps']),
-        "learning_rate_decay": tune.choice(cfg['hyperparameters']['learning_rate_decay']),
-        "momentum": tune.choice(cfg['hyperparameters']['momentum']),
-        "batch_size": tune.choice(cfg['hyperparameters']['batch_size']),
-        "epochs": tune.choice(cfg['hyperparameters']['epochs']),
-        "activation_function": tune.choice(cfg['hyperparameters']['activation_function']),
-        "dropout_rate": tune.choice(cfg['hyperparameters']['dropout_rate']),
-        "optimizer": tune.choice(cfg['hyperparameters']['optimizer']),
-        "model_type": model_type
-    }
+    # Get input shape and dataset size
+    temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
+    for sample, label in temp_dataset.take(1):
+        input_shape = sample.shape
     
-    # Resources
-    resources = {"cpu": 1, "gpu": 1}
+    temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
+    dataset_size = sum(1 for _ in temp_dataset)
+    del temp_dataset
     
-    # Search algorithm
-    search_alg = OptunaSearch()
+    print(f"Dataset size: {dataset_size}, Input shape: {input_shape}")
     
-    # Create tuner
-    tuner = tune.Tuner(
-        tune.with_resources(trainable_cv, resources),
-        param_space=search_space,
-        tune_config=tune.TuneConfig(
-            num_samples=cfg['cross_validation']['num_trials'],
-            max_concurrent_trials=cfg['cross_validation']['max_concurrent_trials'],
-            search_alg=search_alg
-        ),
-        run_config=tune.RunConfig(
-            storage_path=os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_cv_results')
-        )
+    # Create hypermodel
+    hypermodel = ModelHyperModel(
+        model_type=model_type,
+        config_path=config_path,
+        dataset_path=dataset_path,
+        input_shape=input_shape,
+        dataset_size=dataset_size,
+        k_folds=cfg['cross_validation']['k_folds']
     )
     
-    # Run optimization
-    results = tuner.fit()
+    # Create output directory
+    output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_cv_results')
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Get best result with error handling
-    try:
-        best_result = results.get_best_result(metric="avg_acc", mode="max")
-        
-        # Check if metrics are available
-        if not best_result.metrics or 'avg_acc' not in best_result.metrics:
-            print(f"ERROR: No valid trials completed for {model_type}. All trials failed.")
-            print("Check for memory issues (OOM) or dataset problems.")
-            print(f"Best result metrics: {best_result.metrics}")
-            return None
-        
-        best_config = best_result.config
-        
-        # Save best configuration (in the same cv_results folder)
-        output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_cv_results', f'{model_type}_best_config')
-        os.makedirs(output_dir, exist_ok=True)
-        
-        with open(os.path.join(output_dir, 'best_config.json'), 'w') as f:
-            json.dump(best_config, f, indent=2)
-        
-        print(f"Best configuration for {model_type}:")
-        print(f"Accuracy: {best_result.metrics['avg_acc']:.4f}")
-        print(f"Loss: {best_result.metrics['avg_loss']:.4f}")
-        print(f"Config: {best_config}")
-        
-        return best_config
-    except Exception as e:
-        print(f"ERROR: Failed to get best result for {model_type}: {str(e)}")
-        print("This likely means all trials failed. Check logs for OOM or other errors.")
-        return None
+    # Create tuner (using Bayesian Optimization)
+    tuner = kt.BayesianOptimization(
+        hypermodel,
+        objective='val_accuracy',
+        max_trials=cfg['cross_validation']['num_trials'],
+        directory=output_dir,
+        project_name=f'{model_type}_tuning',
+        overwrite=False
+    )
+    
+    # Print search space summary
+    print("\nStarting hyperparameter search...")
+    tuner.search_space_summary()
+    
+    # Run search
+    tuner.search(epochs=cfg['hyperparameters']['epochs'][0])  # Use first epoch value
+    
+    # Get best hyperparameters
+    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+    
+    # Convert to config dict
+    best_config = {
+        'model_type': model_type,
+        'learning_rate': best_hps.get('learning_rate'),
+        'learning_rate_decay_steps': best_hps.get('learning_rate_decay_steps'),
+        'learning_rate_decay': best_hps.get('learning_rate_decay'),
+        'momentum': best_hps.get('momentum'),
+        'batch_size': best_hps.get('batch_size'),
+        'epochs': cfg['hyperparameters']['epochs'][0],
+        'dropout_rate': best_hps.get('dropout_rate'),
+        'activation_function': best_hps.get('activation_function'),
+        'optimizer': best_hps.get('optimizer')
+    }
+    
+    # Save best configuration
+    best_config_dir = os.path.join(output_dir, f'{model_type}_best_config')
+    os.makedirs(best_config_dir, exist_ok=True)
+    
+    with open(os.path.join(best_config_dir, 'best_config.json'), 'w') as f:
+        json.dump(best_config, f, indent=2)
+    
+    # Print results
+    print(f"\nBest configuration for {model_type}:")
+    print(f"Best validation accuracy: {tuner.get_best_models(num_models=1)[0].evaluate(None)[1]:.4f}")
+    print(f"Config: {json.dumps(best_config, indent=2)}")
+    
+    return best_config
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cross-validation for model selection")
