@@ -64,7 +64,7 @@ def train_model(model_type, config_path, best_config_path=None):
     
     # Get input shape and dataset sizes
     for sample, label in train_dataset.take(1):
-        input_shape = sample.shape
+        input_shape = tuple(sample.shape.as_list())  # Convert to tuple
     
     train_size = get_tfrecord_length(train_dataset)
     val_size = get_tfrecord_length(val_dataset)

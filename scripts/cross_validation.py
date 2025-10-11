@@ -140,7 +140,7 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     # Get input shape and dataset size
     temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
     for sample, label in temp_dataset.take(1):
-        input_shape = sample.shape
+        input_shape = tuple(sample.shape.as_list())  # Convert to tuple
     
     temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
     dataset_size = sum(1 for _ in temp_dataset)
