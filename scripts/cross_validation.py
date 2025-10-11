@@ -20,9 +20,8 @@ from utils import read_tfrecords, get_tfrecord_length
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
 
-def k_fold_split(dataset, num_folds, fold_idx):
+def k_fold_split(dataset, num_folds, fold_idx, dataset_size):
     """Split dataset into k folds for cross-validation"""
-    dataset_size = sum(1 for _ in dataset)
     fold_size = dataset_size // num_folds
     
     # Create validation dataset for the current fold
@@ -107,11 +106,12 @@ def trainable_cv(config):
             training_dataset = read_tfrecords(dataset_path, buffer_size=64000)
             
             # Split data for this fold
-            train_dataset, val_dataset = k_fold_split(training_dataset, cfg['cross_validation']['k_folds'], fold_idx)
+            train_dataset, val_dataset = k_fold_split(training_dataset, cfg['cross_validation']['k_folds'], fold_idx, dataset_size)
             
-            # Training loop
+            # Training loop (use smaller shuffle buffer to reduce memory usage)
+            shuffle_buffer = min(1000, dataset_size)
             for epoch in range(config['epochs']):
-                for step, (samples, labels) in enumerate(train_dataset.batch(config['batch_size']).shuffle(buffer_size=dataset_size)):
+                for step, (samples, labels) in enumerate(train_dataset.batch(config['batch_size']).shuffle(buffer_size=shuffle_buffer)):
                     loss = train_step(net, optimizer, loss_fn, samples, labels)
             
             # Validation
@@ -208,9 +208,10 @@ def run_cross_validation(model_type, config_path='config.yaml'):
         best_result = results.get_best_result(metric="avg_acc", mode="max")
         
         # Check if metrics are available
-        if 'avg_acc' not in best_result.metrics:
+        if not best_result.metrics or 'avg_acc' not in best_result.metrics:
             print(f"ERROR: No valid trials completed for {model_type}. All trials failed.")
             print("Check for memory issues (OOM) or dataset problems.")
+            print(f"Best result metrics: {best_result.metrics}")
             return None
         
         best_config = best_result.config
