@@ -1,22 +1,38 @@
 #!/usr/bin/env python3
 """
-Regular training script for models (Simplified)
+Regular training script for PyTorch models
+Supports MobileNetV2 and ResNet18
 """
 
 import os
 import sys
 import yaml
 import json
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import argparse
 from datetime import datetime
+import csv
+from torch.utils.tensorboard import SummaryWriter
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import read_tfrecords, get_tfrecord_length
+from utils import read_tfrecords, get_dataset_length, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
+
+
+def get_device():
+    """Get available device (MPS for Apple Silicon, CUDA for NVIDIA, CPU otherwise)"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
 
 def train_model(model_type, config_path, best_config_path=None):
     """Train a model with the best configuration from cross-validation"""
@@ -53,6 +69,7 @@ def train_model(model_type, config_path, best_config_path=None):
     os.makedirs(run_folder, exist_ok=True)
     
     # Load datasets
+    print("\nLoading datasets...")
     train_dataset = read_tfrecords(
         os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file']), 
         buffer_size=64000
@@ -62,24 +79,36 @@ def train_model(model_type, config_path, best_config_path=None):
         buffer_size=64000
     )
     
-    # Get input shape and dataset sizes
-    for sample, label in train_dataset.take(1):
-        input_shape = tuple(sample.shape.as_list())  # Convert to tuple
+    # Get input shape from first sample
+    sample, label = train_dataset[0]
+    input_shape = tuple(sample.shape[1:]) + (sample.shape[0],)  # Convert (C, H, W) to (H, W, C) for config
     
-    train_size = get_tfrecord_length(train_dataset)
-    val_size = get_tfrecord_length(val_dataset)
+    train_size = get_dataset_length(train_dataset)
+    val_size = get_dataset_length(val_dataset)
     print(f"\nDataset Info:")
     print(f"  Training samples: {train_size}")
     print(f"  Validation samples: {val_size}")
-    print(f"  Input shape: {input_shape}")
+    print(f"  Input shape (HWC format): {input_shape}")
     
-    # Prepare datasets
-    shuffle_buffer = min(10000, train_size)
-    train_batches = train_dataset.shuffle(shuffle_buffer).batch(best_config['batch_size']).repeat()
-    val_batches = val_dataset.batch(best_config['batch_size'])
+    # Create data loaders
+    train_loader = create_dataloader(
+        train_dataset,
+        batch_size=best_config['batch_size'],
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True
+    )
+    val_loader = create_dataloader(
+        val_dataset,
+        batch_size=best_config['batch_size'],
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True
+    )
     
-    # Calculate steps per epoch
-    steps_per_epoch = (train_size + best_config['batch_size'] - 1) // best_config['batch_size']
+    # Get device
+    device = get_device()
+    print(f"\nUsing device: {device}")
     
     # Create model
     print(f"\nCreating {model_type} model...")
@@ -87,101 +116,182 @@ def train_model(model_type, config_path, best_config_path=None):
         model = MobileNetV2Model(model_config=best_config, training=True, input_shape=input_shape)
     elif model_type == 'resnet18':
         model = ResNet18Model(model_config=best_config, training=True, input_shape=input_shape)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
     
-    # Learning rate schedule
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=best_config['learning_rate'],
-        decay_steps=best_config['learning_rate_decay_steps'],
-        decay_rate=best_config['learning_rate_decay'],
-        staircase=True
-    )
+    model = model.to(device)
+    
+    # Loss function
+    criterion = nn.BCELoss()
     
     # Optimizer
     if best_config["optimizer"] == "adam":
-        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        optimizer = optim.Adam(model.parameters(), lr=best_config['learning_rate'])
     elif best_config["optimizer"] == "sgd":
-        optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=best_config["momentum"])
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=best_config['learning_rate'],
+            momentum=best_config.get('momentum', 0.9)
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {best_config['optimizer']}")
     
-    # Compile model
-    model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.BinaryCrossentropy(from_logits=False),
-        metrics=['accuracy']
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=best_config['learning_rate_decay_steps'],
+        gamma=best_config['learning_rate_decay']
     )
     
-    # Setup callbacks
-    callbacks = [
-        # Early stopping
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=cfg['training']['patience'],
-            min_delta=cfg['training']['min_delta'],
-            restore_best_weights=True,
-            verbose=1
-        ),
-        # Model checkpoint
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(run_folder, f'{model_type}_model_best.h5'),
-            monitor='val_loss',
-            save_best_only=True,
-            save_weights_only=False,
-            verbose=1
-        ),
-        # CSV Logger
-        tf.keras.callbacks.CSVLogger(
-            filename=os.path.join(run_folder, 'training_results.csv'),
-            separator=',',
-            append=False
-        ),
-        # TensorBoard
-        tf.keras.callbacks.TensorBoard(
-            log_dir=os.path.join(run_folder, 'logs'),
-            histogram_freq=0,
-            write_graph=True
-        )
-    ]
+    # TensorBoard writer
+    writer = SummaryWriter(log_dir=os.path.join(run_folder, 'logs'))
     
-    # Train model
+    # Training loop
     print(f"\nStarting training...")
     print(f"  Max epochs: {cfg['training']['max_epochs']}")
-    print(f"  Steps per epoch: {steps_per_epoch}")
+    print(f"  Batch size: {best_config['batch_size']}")
     print(f"  Early stopping patience: {cfg['training']['patience']}")
     
-    history = model.fit(
-        train_batches,
-        epochs=cfg['training']['max_epochs'],
-        steps_per_epoch=steps_per_epoch,
-        validation_data=val_batches,
-        callbacks=callbacks,
-        verbose=1
-    )
+    best_val_loss = float('inf')
+    patience_counter = 0
+    training_history = []
+    
+    for epoch in range(cfg['training']['max_epochs']):
+        # Training phase
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        
+        for batch_idx, (inputs, labels) in enumerate(train_loader):
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            # Forward pass
+            optimizer.zero_grad()
+            outputs = model(inputs).squeeze()
+            loss = criterion(outputs, labels)
+            
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+            
+            # Statistics
+            train_loss += loss.item() * inputs.size(0)
+            predictions = (outputs > 0.5).float()
+            train_correct += (predictions == labels).sum().item()
+            train_total += labels.size(0)
+        
+        # Calculate training metrics
+        avg_train_loss = train_loss / train_total
+        train_accuracy = train_correct / train_total
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                
+                outputs = model(inputs).squeeze()
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item() * inputs.size(0)
+                predictions = (outputs > 0.5).float()
+                val_correct += (predictions == labels).sum().item()
+                val_total += labels.size(0)
+        
+        # Calculate validation metrics
+        avg_val_loss = val_loss / val_total
+        val_accuracy = val_correct / val_total
+        
+        # Step scheduler
+        scheduler.step()
+        
+        # Log metrics
+        print(f"Epoch {epoch+1}/{cfg['training']['max_epochs']} - "
+              f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f} - "
+              f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+        
+        # TensorBoard logging
+        writer.add_scalar('Loss/train', avg_train_loss, epoch)
+        writer.add_scalar('Loss/val', avg_val_loss, epoch)
+        writer.add_scalar('Accuracy/train', train_accuracy, epoch)
+        writer.add_scalar('Accuracy/val', val_accuracy, epoch)
+        writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+        
+        # Save training history
+        training_history.append({
+            'epoch': epoch + 1,
+            'train_loss': avg_train_loss,
+            'train_accuracy': train_accuracy,
+            'val_loss': avg_val_loss,
+            'val_accuracy': val_accuracy,
+            'learning_rate': optimizer.param_groups[0]['lr']
+        })
+        
+        # Check for improvement
+        if avg_val_loss < best_val_loss - cfg['training']['min_delta']:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            # Save best model
+            torch.save(model.state_dict(), os.path.join(run_folder, f'{model_type}_model_best.pth'))
+            print(f"  ✓ Saved best model (val_loss: {best_val_loss:.4f})")
+        else:
+            patience_counter += 1
+            print(f"  No improvement for {patience_counter} epoch(s)")
+        
+        # Early stopping
+        if patience_counter >= cfg['training']['patience']:
+            print(f"\nEarly stopping triggered after {epoch+1} epochs")
+            break
     
     # Save final model weights
-    model.save_weights(os.path.join(run_folder, f'{model_type}_model_final_weights'))
+    torch.save(model.state_dict(), os.path.join(run_folder, f'{model_type}_model_final_weights.pth'))
+    
+    # Save complete model (architecture + weights)
+    torch.save(model, os.path.join(run_folder, f'{model_type}_model_complete.pth'))
     
     # Save model configuration
     config_file = os.path.join(run_folder, 'model_config.json')
     with open(config_file, 'w') as f:
         json.dump(best_config, f, indent=2)
     
+    # Save training history to CSV
+    csv_file = os.path.join(run_folder, 'training_results.csv')
+    with open(csv_file, 'w', newline='') as f:
+        if training_history:
+            writer_csv = csv.DictWriter(f, fieldnames=training_history[0].keys())
+            writer_csv.writeheader()
+            writer_csv.writerows(training_history)
+    
+    # Close TensorBoard writer
+    writer.close()
+    
     # Print summary
     print(f"\nTraining completed!")
-    print(f"  Final train accuracy: {history.history['accuracy'][-1]:.4f}")
-    print(f"  Final val accuracy: {history.history['val_accuracy'][-1]:.4f}")
-    print(f"  Best val loss: {min(history.history['val_loss']):.4f}")
+    if training_history:
+        print(f"  Final train accuracy: {training_history[-1]['train_accuracy']:.4f}")
+        print(f"  Final val accuracy: {training_history[-1]['val_accuracy']:.4f}")
+        print(f"  Best val loss: {best_val_loss:.4f}")
     print(f"  Results saved to: {run_folder}")
     print(f"  View TensorBoard: tensorboard --logdir {os.path.join(run_folder, 'logs')}")
     
     return run_folder
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Regular training")
+    parser = argparse.ArgumentParser(description="Regular training with PyTorch")
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
     parser.add_argument("--config", default="config.yaml", help="Configuration file")
-    parser.add_argument("--best_config", default=None, help="Path to best configuration from CV (defaults to cross_validation_results/{model}_best_config/best_config.json)")
+    parser.add_argument("--best_config", default=None, help="Path to best configuration from CV")
     
     args = parser.parse_args()
     
     # Run training
     output_folder = train_model(args.model, args.config, args.best_config)
-    print(f"Training completed. Output folder: {output_folder}")
+    print(f"\n✅ Training completed. Output folder: {output_folder}")

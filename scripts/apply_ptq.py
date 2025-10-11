@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Post-Training Quantization (PTQ) script
+Post-Training Quantization (PTQ) script for PyTorch models
 """
 
 import os
 import sys
 import yaml
 import json
-import tensorflow as tf
+import torch
 import argparse
 from datetime import datetime
 
@@ -18,6 +18,13 @@ from utils import read_tfrecords
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
 from quantization_utils import QuantizationUtils
+
+
+def get_device():
+    """Get available device (CPU for quantization)"""
+    # PTQ works on CPU
+    return torch.device("cpu")
+
 
 def apply_ptq_to_model(model_type, model_path, config_path):
     """Apply Post-Training Quantization to a trained model"""
@@ -36,94 +43,109 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     ptq_folder = f"ptq_{model_type}_{timestamp}"
     os.makedirs(ptq_folder, exist_ok=True)
     
-    # Load datasets for calibration
+    print(f"Applying PTQ to {model_type} model...")
+    print(f"Original model path: {model_path}")
+    
+    # Load calibration dataset
+    print("\nLoading calibration dataset...")
     train_dataset = read_tfrecords(
         os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file']), 
         buffer_size=64000
     )
-    test_dataset = read_tfrecords(
-        os.path.join(cfg['data']['dataset_folder'], cfg['data']['test_file']), 
-        buffer_size=64000
-    )
     
-    # Get input shape
-    for sample, label in train_dataset.take(1):
-        shape = [None] + sample.shape
+    # Get input shape from first sample
+    sample, label = train_dataset[0]
+    input_shape = tuple(sample.shape[1:]) + (sample.shape[0],)  # Convert (C, H, W) to (H, W, C) for config
+    
+    print(f"Input shape (HWC format): {input_shape}")
+    
+    # Get device
+    device = get_device()
+    print(f"Using device: {device}")
     
     # Recreate the original model
+    print("\nLoading original FP32 model...")
     if model_type == 'mobilenetv2':
         original_model = MobileNetV2Model(
-            model_config=model_config, 
-            training=False, 
-            input_shape=shape[1:]
+            model_config=model_config,
+            training=False,
+            input_shape=input_shape
         )
     elif model_type == 'resnet18':
         original_model = ResNet18Model(
-            model_config=model_config, 
-            training=False, 
-            input_shape=shape[1:]
+            model_config=model_config,
+            training=False,
+            input_shape=input_shape
         )
-    
-    original_model.build(shape)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
     
     # Load weights
-    weights_path = os.path.join(model_path, f'{model_type}_model_weights')
-    original_model.load_weights(weights_path)
+    weights_path = os.path.join(model_path, f'{model_type}_model_best.pth')
+    if not os.path.exists(weights_path):
+        weights_path = os.path.join(model_path, f'{model_type}_model_final_weights.pth')
     
-    # Create representative dataset for calibration
-    representative_dataset = QuantizationUtils.create_representative_dataset(
+    original_model.load_state_dict(torch.load(weights_path, map_location=device))
+    original_model = original_model.to(device)
+    original_model.eval()
+    
+    print(f"Loaded weights from: {weights_path}")
+    
+    # Create calibration loader
+    print("\nCreating calibration data loader...")
+    calibration_loader = QuantizationUtils.create_calibration_loader(
         os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file']),
-        num_samples=cfg['quantization']['ptq_calibration_samples']
+        num_samples=cfg['quantization']['ptq_calibration_samples'],
+        batch_size=16
     )
     
     # Apply PTQ
+    print("\n" + "="*60)
     print("Applying Post-Training Quantization...")
-    quantized_tflite_model = QuantizationUtils.apply_ptq_to_model(
-        original_model, 
-        representative_dataset, 
-        cfg
+    print("="*60)
+    quantized_model = QuantizationUtils.apply_ptq_to_model(
+        original_model,
+        calibration_loader,
+        device=device
     )
-    
-    if quantized_tflite_model is None:
-        print("Failed to apply PTQ")
-        return None
     
     # Save quantized model
-    quantized_model_path = os.path.join(ptq_folder, f'{model_type}_quantized.tflite')
-    QuantizationUtils.save_quantized_model(quantized_tflite_model, quantized_model_path)
+    quantized_model_path = os.path.join(ptq_folder, f'{model_type}_quantized.pth')
+    QuantizationUtils.save_quantized_model(quantized_model, quantized_model_path)
     
-    # Evaluate original model
-    print("Evaluating original model...")
-    original_interpreter = tf.lite.Interpreter(model_path=quantized_model_path)
-    original_interpreter.allocate_tensors()
+    # Save complete quantized model (architecture + weights)
+    quantized_complete_path = os.path.join(ptq_folder, f'{model_type}_quantized_complete.pth')
+    torch.save(quantized_model, quantized_complete_path)
     
-    # For original model evaluation, we need to convert to TFLite first
-    converter = tf.lite.TFLiteConverter.from_keras_model(original_model)
-    original_tflite_model = converter.convert()
-    original_tflite_path = os.path.join(ptq_folder, f'{model_type}_original.tflite')
-    with open(original_tflite_path, 'wb') as f:
-        f.write(original_tflite_model)
-    
-    # Evaluate both models
-    print("Evaluating quantized model...")
-    quantized_interpreter = tf.lite.Interpreter(model_path=quantized_model_path)
-    quantized_interpreter.allocate_tensors()
+    # Save original model for comparison
+    original_model_path = os.path.join(ptq_folder, f'{model_type}_original.pth')
+    torch.save(original_model.state_dict(), original_model_path)
     
     # Compare model sizes
+    print("\n" + "="*60)
+    print("Comparing Model Sizes")
+    print("="*60)
     size_comparison = QuantizationUtils.compare_model_sizes(
-        original_tflite_path, 
-        quantized_model_path
+        original_model,
+        quantized_model,
+        temp_dir=ptq_folder
     )
+    
+    # Save model configuration
+    config_output = os.path.join(ptq_folder, 'model_config.json')
+    with open(config_output, 'w') as f:
+        json.dump(model_config, f, indent=2)
     
     # Save results
     results = {
         'model_type': model_type,
         'original_model_path': model_path,
         'quantized_model_path': quantized_model_path,
+        'quantized_complete_path': quantized_complete_path,
         'size_comparison': size_comparison,
         'ptq_config': {
             'calibration_samples': cfg['quantization']['ptq_calibration_samples'],
-            'representative_dataset_size': cfg['quantization']['ptq_representative_dataset_size']
+            'representative_dataset_size': cfg['quantization'].get('ptq_representative_dataset_size', 200)
         }
     }
     
@@ -131,16 +153,24 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"PTQ completed. Results saved to {ptq_folder}")
-    print(f"Model size reduction: {size_comparison['size_reduction_percent']:.2f}%")
+    print(f"\n{'='*60}")
+    print("PTQ Summary")
+    print(f"{'='*60}")
+    print(f"Model type: {model_type}")
+    print(f"Original model size: {size_comparison['original_size_mb']:.2f} MB")
+    print(f"Quantized model size: {size_comparison['quantized_size_mb']:.2f} MB")
+    print(f"Size reduction: {size_comparison['size_reduction_percent']:.1f}%")
     print(f"Compression ratio: {size_comparison['compression_ratio']:.2f}x")
+    print(f"{'='*60}")
+    print(f"Results saved to: {ptq_folder}")
     
     return ptq_folder
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Post-Training Quantization")
+    parser = argparse.ArgumentParser(description="Post-Training Quantization with PyTorch")
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
-    parser.add_argument("--model_path", required=True, help="Path to trained model")
+    parser.add_argument("--model_path", required=True, help="Path to trained model directory")
     parser.add_argument("--config", default="config.yaml", help="Configuration file")
     
     args = parser.parse_args()
@@ -148,6 +178,6 @@ if __name__ == "__main__":
     # Apply PTQ
     output_folder = apply_ptq_to_model(args.model, args.model_path, args.config)
     if output_folder:
-        print(f"PTQ completed. Output folder: {output_folder}")
+        print(f"\n✅ PTQ completed successfully. Output folder: {output_folder}")
     else:
-        print("PTQ failed")
+        print("\n❌ PTQ failed")

@@ -6,3 +6,8 @@ core*
 *.swp
 train-container-sandbox/
 *model*
+training_run*
+cross_validation_results/
+*.pth
+venv/
+.DS_Store

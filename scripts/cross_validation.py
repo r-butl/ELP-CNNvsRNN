@@ -1,199 +1,261 @@
 #!/usr/bin/env python3
 """
-Cross-validation script for hyperparameter selection using Keras Tuner
+Cross-validation script for hyperparameter selection using Optuna
+PyTorch implementation
 """
 
 import os
 import sys
 import yaml
-import tensorflow as tf
-import keras_tuner as kt
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import argparse
 import json
+import optuna
+from torch.utils.data import DataLoader, Subset
+import numpy as np
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import read_tfrecords, get_tfrecord_length
+from utils import read_tfrecords, get_dataset_length, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
 
-def k_fold_split(dataset, num_folds, fold_idx, dataset_size):
+
+def get_device():
+    """Get available device"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
+
+def k_fold_split(dataset, num_folds, fold_idx):
     """Split dataset into k folds for cross-validation"""
+    dataset_size = len(dataset)
     fold_size = dataset_size // num_folds
     
-    # Create validation dataset for the current fold
-    val_dataset = dataset.skip(fold_idx * fold_size).take(fold_size)
+    # Get indices for validation fold
+    val_start = fold_idx * fold_size
+    val_end = val_start + fold_size
     
-    # Create training dataset by skipping the validation fold
-    train_dataset = dataset.take(fold_idx * fold_size).concatenate(
-        dataset.skip((fold_idx + 1) * fold_size)
-    )
+    # Create indices
+    all_indices = list(range(dataset_size))
+    val_indices = all_indices[val_start:val_end]
+    train_indices = all_indices[:val_start] + all_indices[val_end:]
+    
+    # Create subsets
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
     
     return train_dataset, val_dataset
 
-class ModelHyperModel(kt.HyperModel):
-    """Hypermodel for Keras Tuner with cross-validation"""
+
+def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterion, device, epochs=15):
+    """Train model on one fold and return validation accuracy"""
     
-    def __init__(self, model_type, config_path, dataset_path, input_shape, dataset_size, k_folds):
-        self.model_type = model_type
-        self.config_path = config_path
-        self.dataset_path = dataset_path
-        self.input_shape = input_shape
-        self.dataset_size = dataset_size
-        self.k_folds = k_folds
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        train_loss = 0.0
         
-    def build(self, hp):
-        """Build model with hyperparameters"""
-        # Define hyperparameters
-        config = {
-            'model_type': self.model_type,
-            'learning_rate': hp.Choice('learning_rate', values=[0.001, 0.0001, 0.00001]),
-            'learning_rate_decay_steps': hp.Choice('learning_rate_decay_steps', values=[100, 200, 500]),
-            'learning_rate_decay': hp.Choice('learning_rate_decay', values=[0.9, 0.95, 0.97]),
-            'momentum': hp.Choice('momentum', values=[0.9, 0.95]),
-            'batch_size': hp.Choice('batch_size', values=[16, 32, 64]),
-            'dropout_rate': hp.Choice('dropout_rate', values=[0.1, 0.2, 0.3]),
-            'activation_function': hp.Choice('activation_function', values=['ReLU', 'LeakyReLU']),
-            'optimizer': hp.Choice('optimizer', values=['adam', 'sgd'])
-        }
+        for inputs, labels in train_loader:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(inputs).squeeze()
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item() * inputs.size(0)
+        
+        # Validation
+        model.eval()
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                
+                outputs = model(inputs).squeeze()
+                predictions = (outputs > 0.5).float()
+                val_correct += (predictions == labels).sum().item()
+                val_total += labels.size(0)
+        
+        val_accuracy = val_correct / val_total if val_total > 0 else 0.0
+    
+    return val_accuracy
+
+
+def objective(trial, model_type, dataset, input_shape, cfg, device):
+    """Optuna objective function for hyperparameter optimization"""
+    
+    # Sample hyperparameters
+    config = {
+        'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True),
+        'learning_rate_decay_steps': trial.suggest_categorical('learning_rate_decay_steps', [100, 200, 500]),
+        'learning_rate_decay': trial.suggest_categorical('learning_rate_decay', [0.9, 0.95, 0.97, 1.0]),
+        'momentum': trial.suggest_categorical('momentum', [0.5, 0.7, 0.9]),
+        'batch_size': trial.suggest_categorical('batch_size', [8, 16, 32]),
+        'dropout_rate': trial.suggest_categorical('dropout_rate', [0.1, 0.2, 0.3, 0.5]),
+        'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU']),
+        'optimizer': trial.suggest_categorical('optimizer', ['adam', 'sgd']),
+        'model_type': model_type
+    }
+    
+    # K-fold cross-validation
+    k_folds = cfg['cross_validation']['k_folds']
+    fold_scores = []
+    
+    for fold_idx in range(k_folds):
+        print(f"\n  Trial {trial.number}, Fold {fold_idx + 1}/{k_folds}")
+        
+        # Split data
+        train_dataset, val_dataset = k_fold_split(dataset, k_folds, fold_idx)
+        
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['batch_size'],
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config['batch_size'],
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True
+        )
         
         # Create model
-        if self.model_type == 'mobilenetv2':
-            model = MobileNetV2Model(model_config=config, training=True, input_shape=self.input_shape)
-        elif self.model_type == 'resnet18':
-            model = ResNet18Model(model_config=config, training=True, input_shape=self.input_shape)
+        if model_type == 'mobilenetv2':
+            model = MobileNetV2Model(model_config=config, training=True, input_shape=input_shape)
+        elif model_type == 'resnet18':
+            model = ResNet18Model(model_config=config, training=True, input_shape=input_shape)
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
         
-        # Learning rate schedule
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=config['learning_rate'],
-            decay_steps=config['learning_rate_decay_steps'],
-            decay_rate=config['learning_rate_decay'],
-            staircase=True
-        )
+        model = model.to(device)
+        
+        # Loss function
+        criterion = nn.BCELoss()
         
         # Optimizer
         if config['optimizer'] == 'adam':
-            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        else:
-            optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=config['momentum'])
+            optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+        elif config['optimizer'] == 'sgd':
+            optimizer = optim.SGD(
+                model.parameters(),
+                lr=config['learning_rate'],
+                momentum=config['momentum']
+            )
         
-        # Compile
-        model.compile(
-            optimizer=optimizer,
-            loss=tf.keras.losses.BinaryCrossentropy(from_logits=False),
-            metrics=['accuracy']
+        # Learning rate scheduler
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=config['learning_rate_decay_steps'],
+            gamma=config['learning_rate_decay']
         )
         
-        return model
+        # Train and evaluate
+        val_accuracy = train_and_evaluate_fold(
+            model, train_loader, val_loader, optimizer, criterion, device,
+            epochs=cfg['cross_validation']['max_epochs']
+        )
+        
+        fold_scores.append(val_accuracy)
+        print(f"    Fold {fold_idx + 1} Validation Accuracy: {val_accuracy:.4f}")
+        
+        # Clean up
+        del model, train_loader, val_loader, optimizer
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
-    def fit(self, hp, model, *args, **kwargs):
-        """Custom fit with k-fold cross-validation"""
-        batch_size = hp.get('batch_size')
-        
-        fold_scores = []
-        for fold_idx in range(self.k_folds):
-            print(f"\nFold {fold_idx + 1}/{self.k_folds}")
-            
-            # Load and split dataset
-            training_dataset = read_tfrecords(self.dataset_path, buffer_size=64000)
-            train_dataset, val_dataset = k_fold_split(training_dataset, self.k_folds, fold_idx, self.dataset_size)
-            
-            # Prepare datasets
-            shuffle_buffer = min(1000, self.dataset_size)
-            train_batches = train_dataset.shuffle(shuffle_buffer).batch(batch_size).repeat()
-            val_batches = val_dataset.batch(batch_size)
-            
-            # Calculate steps
-            train_fold_size = self.dataset_size * (self.k_folds - 1) // self.k_folds
-            steps_per_epoch = (train_fold_size + batch_size - 1) // batch_size
-            
-            # Train
-            history = model.fit(
-                train_batches,
-                steps_per_epoch=steps_per_epoch,
-                validation_data=val_batches,
-                verbose=1,
-                **kwargs
-            )
-            
-            # Store validation accuracy
-            fold_scores.append(history.history['val_accuracy'][-1])
-            
-            # Clean up
-            del training_dataset, train_dataset, val_dataset
-            tf.keras.backend.clear_session()
-        
-        # Return average validation accuracy
-        return {'val_accuracy': sum(fold_scores) / len(fold_scores)}
+    # Return average validation accuracy
+    avg_accuracy = np.mean(fold_scores)
+    print(f"  Trial {trial.number} Average Accuracy: {avg_accuracy:.4f}")
+    
+    return avg_accuracy
+
 
 def run_cross_validation(model_type, config_path='config.yaml'):
-    """Run cross-validation for a specific model type using Keras Tuner"""
+    """Run cross-validation for a specific model type using Optuna"""
     
     # Load configuration
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    # Prepare dataset info
+    # Get device
+    device = get_device()
+    print(f"Using device: {device}")
+    
+    # Prepare dataset
     dataset_path = os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file'])
+    print(f"\nLoading dataset: {dataset_path}")
     
-    # Get input shape and dataset size
-    temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
-    for sample, label in temp_dataset.take(1):
-        input_shape = tuple(sample.shape.as_list())  # Convert to tuple
+    dataset = read_tfrecords(dataset_path, buffer_size=64000)
     
-    temp_dataset = read_tfrecords(dataset_path, buffer_size=64000)
-    dataset_size = sum(1 for _ in temp_dataset)
-    del temp_dataset
+    # Get input shape from first sample
+    sample, label = dataset[0]
+    input_shape = tuple(sample.shape[1:]) + (sample.shape[0],)  # Convert (C, H, W) to (H, W, C) for config
     
-    print(f"Dataset size: {dataset_size}, Input shape: {input_shape}")
+    dataset_size = len(dataset)
     
-    # Create hypermodel
-    hypermodel = ModelHyperModel(
-        model_type=model_type,
-        config_path=config_path,
-        dataset_path=dataset_path,
-        input_shape=input_shape,
-        dataset_size=dataset_size,
-        k_folds=cfg['cross_validation']['k_folds']
-    )
+    print(f"Input shape (HWC format): {input_shape}")
+    print(f"Dataset size: {dataset_size}")
     
     # Create output directory
     output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_cv_results')
     os.makedirs(output_dir, exist_ok=True)
     
-    # Create tuner (using Bayesian Optimization)
-    tuner = kt.BayesianOptimization(
-        hypermodel,
-        objective='val_accuracy',
-        max_trials=cfg['cross_validation']['num_trials'],
-        directory=output_dir,
-        project_name=f'{model_type}_tuning',
-        overwrite=False
+    # Create Optuna study
+    study_name = f'{model_type}_tuning'
+    storage_path = f"sqlite:///{os.path.join(output_dir, 'optuna_study.db')}"
+    
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage_path,
+        direction='maximize',
+        load_if_exists=True
     )
     
-    # Print search space summary
-    print("\nStarting hyperparameter search...")
-    tuner.search_space_summary()
+    print("\nStarting hyperparameter search with Optuna...")
+    print(f"Number of trials: {cfg['cross_validation']['num_trials']}")
+    print(f"K-folds: {cfg['cross_validation']['k_folds']}")
+    print(f"Max epochs per fold: {cfg['cross_validation']['max_epochs']}")
     
-    # Run search
-    tuner.search(epochs=cfg['hyperparameters']['epochs'][0])  # Use first epoch value
+    # Run optimization
+    study.optimize(
+        lambda trial: objective(trial, model_type, dataset, input_shape, cfg, device),
+        n_trials=cfg['cross_validation']['num_trials'],
+        show_progress_bar=True
+    )
     
     # Get best hyperparameters
-    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+    best_params = study.best_params
+    best_value = study.best_value
     
     # Convert to config dict
     best_config = {
         'model_type': model_type,
-        'learning_rate': best_hps.get('learning_rate'),
-        'learning_rate_decay_steps': best_hps.get('learning_rate_decay_steps'),
-        'learning_rate_decay': best_hps.get('learning_rate_decay'),
-        'momentum': best_hps.get('momentum'),
-        'batch_size': best_hps.get('batch_size'),
-        'epochs': cfg['hyperparameters']['epochs'][0],
-        'dropout_rate': best_hps.get('dropout_rate'),
-        'activation_function': best_hps.get('activation_function'),
-        'optimizer': best_hps.get('optimizer')
+        'learning_rate': best_params['learning_rate'],
+        'learning_rate_decay_steps': best_params['learning_rate_decay_steps'],
+        'learning_rate_decay': best_params['learning_rate_decay'],
+        'momentum': best_params['momentum'],
+        'batch_size': best_params['batch_size'],
+        'epochs': cfg['cross_validation']['max_epochs'],
+        'dropout_rate': best_params['dropout_rate'],
+        'activation_function': best_params['activation_function'],
+        'optimizer': best_params['optimizer']
     }
     
     # Save best configuration
@@ -203,15 +265,31 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     with open(os.path.join(best_config_dir, 'best_config.json'), 'w') as f:
         json.dump(best_config, f, indent=2)
     
+    # Save study results
+    results = {
+        'best_params': best_params,
+        'best_value': best_value,
+        'n_trials': len(study.trials)
+    }
+    
+    with open(os.path.join(output_dir, 'study_results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+    
     # Print results
-    print(f"\nBest configuration for {model_type}:")
-    print(f"Best validation accuracy: {tuner.get_best_models(num_models=1)[0].evaluate(None)[1]:.4f}")
-    print(f"Config: {json.dumps(best_config, indent=2)}")
+    print(f"\n{'='*60}")
+    print(f"Cross-Validation Results for {model_type}")
+    print(f"{'='*60}")
+    print(f"Best validation accuracy: {best_value:.4f}")
+    print(f"\nBest configuration:")
+    print(json.dumps(best_config, indent=2))
+    print(f"{'='*60}")
+    print(f"Results saved to: {best_config_dir}")
     
     return best_config
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Cross-validation for model selection")
+    parser = argparse.ArgumentParser(description="Cross-validation with Optuna for PyTorch models")
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
     parser.add_argument("--config", default="config.yaml", help="Configuration file path")
     
@@ -219,3 +297,4 @@ if __name__ == "__main__":
     
     # Run cross-validation
     best_config = run_cross_validation(args.model, args.config)
+    print(f"\n✅ Cross-validation completed!")

@@ -1,22 +1,29 @@
-# Core ML libraries
-tensorflow>=2.10.0
-tensorflow-model-optimization>=0.7.0
-numpy>=1.21.0
-scikit-learn>=1.0.0
+# Core ML libraries - PyTorch (Apple Silicon MPS compatible)
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.23.0,<2.0.0
+scikit-learn>=1.3.0
 
 # Visualization
-matplotlib>=3.5.0
-seaborn>=0.11.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
 
 # Configuration and utilities
 pyyaml>=6.0
-pandas>=1.3.0
+pandas>=2.0.0
 
-# Hyperparameter optimization
-keras-tuner>=1.3.0
+# Hyperparameter optimization (Optuna for PyTorch)
+optuna>=3.0.0
+
+# TensorBoard for PyTorch logging
+tensorboard>=2.14.0
 
 # Workflow management
-snakemake>=7.0.0
+snakemake>=8.0.0
 
 # Additional utilities
-tqdm>=4.60.0
+tqdm>=4.66.0
+
+# TensorFlow (minimal - only for reading TFRecord files)
+# Can be removed once data is converted to native PyTorch format
+tensorflow>=2.16.0,<2.17.0
