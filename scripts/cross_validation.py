@@ -113,11 +113,16 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
             if first_batch:
                 print("    Memory after loading first batch to GPU:")
                 check_mem()
-                first_batch = False
             
             # Forward pass
             outputs = model(inputs).squeeze()
             loss = criterion(outputs, labels)
+            
+            # Check memory after forward pass
+            if first_batch:
+                print("    Memory after forward pass:")
+                check_mem()
+                first_batch = False
             
             # Scale loss for gradient accumulation
             loss = loss / accumulation_steps
@@ -228,6 +233,11 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
                 step_size=config['learning_rate_decay_steps'],
                 gamma=config['learning_rate_decay']
             )
+            
+            # Clear cache before training to avoid fragmentation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             
             # Check memory BEFORE training (after all setup)
             print("    Memory before training:")

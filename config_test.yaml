@@ -28,7 +28,7 @@ hyperparameters:
   learning_rate_decay_steps: [200]  # Single option
   learning_rate_decay: [0.97]  # Single option
   momentum: [0.9]  # Single option
-  batch_size: [8, 16]  # Reduced options
+  batch_size: [2, 4]  # Large spectrograms (563x98) - batch_size=8 causes OOM
   epochs: [5]  # Reduced for testing
   activation_function: ["ReLU"]  # Single option
   dropout_rate: [0.2]  # Single option
