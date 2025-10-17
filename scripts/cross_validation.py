@@ -91,6 +91,7 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
                           effective_batch = actual_batch * accumulation_steps
                           e.g., batch=4 * accum=8 = effective batch of 32
     """
+    first_batch = True
     
     for epoch in range(epochs):
         # Training
@@ -100,8 +101,19 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
         optimizer.zero_grad()  # Zero gradients at start
         
         for batch_idx, (inputs, labels) in enumerate(train_loader):
+            # Check memory after first batch load
+            if first_batch:
+                print(f"    First batch shape: {inputs.shape}, dtype: {inputs.dtype}")
+                print(f"    Batch memory: {inputs.element_size() * inputs.nelement() / (1024**3):.3f} GB")
+            
             inputs = inputs.to(device)
             labels = labels.to(device)
+            
+            # Check memory after moving to device
+            if first_batch:
+                print("    Memory after loading first batch to GPU:")
+                check_mem()
+                first_batch = False
             
             # Forward pass
             outputs = model(inputs).squeeze()
@@ -197,7 +209,6 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
             
             model = model.to(device)
             
-            check_mem()
             # Loss function
             criterion = nn.BCELoss()
             
@@ -217,6 +228,10 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
                 step_size=config['learning_rate_decay_steps'],
                 gamma=config['learning_rate_decay']
             )
+            
+            # Check memory BEFORE training (after all setup)
+            print("    Memory before training:")
+            check_mem()
             
             # Train and evaluate with gradient accumulation
             # Effective batch = config['batch_size'] * 8
