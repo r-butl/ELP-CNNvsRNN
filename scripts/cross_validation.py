@@ -188,6 +188,14 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
             # Split data
             train_dataset, val_dataset = k_fold_split(dataset, k_folds, fold_idx)
             
+            # Check class distribution in this fold
+            train_labels = [dataset[i][1].item() for i in train_dataset.indices]
+            val_labels = [dataset[i][1].item() for i in val_dataset.indices]
+            train_pos = sum(train_labels)
+            val_pos = sum(val_labels)
+            print(f"    Train: {train_pos}/{len(train_labels)} positive ({train_pos/len(train_labels)*100:.1f}%)")
+            print(f"    Val: {val_pos}/{len(val_labels)} positive ({val_pos/len(val_labels)*100:.1f}%)")
+            
             # Create data loaders
             train_loader = DataLoader(
                 train_dataset,
@@ -342,6 +350,15 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     input_shape = tuple(sample.shape[1:]) + (sample.shape[0],)  # Convert (C, H, W) to (H, W, C) for config
     
     dataset_size = len(dataset)
+    
+    # Check overall class distribution
+    all_labels = [dataset[i][1].item() for i in range(len(dataset))]
+    total_pos = sum(all_labels)
+    print(f"Overall class distribution: {total_pos}/{len(all_labels)} positive ({total_pos/len(all_labels)*100:.1f}%)")
+    
+    # Check if data is ordered by class (first 10 and last 10 labels)
+    print(f"First 10 labels: {all_labels[:10]}")
+    print(f"Last 10 labels: {all_labels[-10:]}")
     
     print(f"Input shape (HWC format): {input_shape}")
     print(f"Dataset size: {dataset_size}")
