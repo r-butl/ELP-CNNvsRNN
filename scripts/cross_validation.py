@@ -26,6 +26,29 @@ from utils import read_tfrecords, get_dataset_length, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
 
+import torch
+
+def check_mem():
+    # Check if CUDA is available
+    print(f"CUDA available: {torch.cuda.is_available()}")
+
+    if torch.cuda.is_available():
+        # Total GPU memory
+        total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # in GB
+        print(f"Total GPU memory: {total_memory:.2f} GB")
+    
+        # Currently allocated memory
+        allocated = torch.cuda.memory_allocated(0) / (1024**3)  # in GB
+        print(f"Currently allocated: {allocated:.2f} GB")
+    
+        # Reserved (cached) memory
+        reserved = torch.cuda.memory_reserved(0) / (1024**3)  # in GB
+        print(f"Reserved (cached): {reserved:.2f} GB")
+    
+        # Available memory (approximate)
+        available = total_memory - (reserved / 1024**3)
+        print(f"Approximately available: {available:.2f} GB")
+
 
 def get_device():
     """Get available device"""
@@ -124,20 +147,19 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
     elif torch.backends.mps.is_available():
         if hasattr(torch.mps, 'empty_cache'):
             torch.mps.empty_cache()
-    
-    # Sample hyperparameters
+   
     config = {
-        'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True),
-        'learning_rate_decay_steps': trial.suggest_categorical('learning_rate_decay_steps', [100, 200, 500]),
-        'learning_rate_decay': trial.suggest_categorical('learning_rate_decay', [0.9, 0.95, 0.97, 1.0]),
-        'momentum': trial.suggest_categorical('momentum', [0.5, 0.7, 0.9]),
-        'batch_size': trial.suggest_categorical('batch_size', [2, 4]),
-        'dropout_rate': trial.suggest_categorical('dropout_rate', [0.1, 0.2, 0.3, 0.5]),
-        'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU']),
-        'optimizer': trial.suggest_categorical('optimizer', ['adam', 'sgd']),
+        'learning_rate': trial.suggest_categorical('learning_rate', cfg['hyperparameters']['learning_rate']),
+        'learning_rate_decay_steps': trial.suggest_categorical('learning_rate_decay_steps', cfg['hyperparameters']['learning_rate_decay_steps']),
+        'learning_rate_decay': trial.suggest_categorical('learning_rate_decay', cfg['hyperparameters']['learning_rate_decay']),
+        'momentum': trial.suggest_categorical('momentum', cfg['hyperparameters']['momentum']),
+        'batch_size': trial.suggest_categorical('batch_size', cfg['hyperparameters']['batch_size']),
+        'dropout_rate': trial.suggest_categorical('dropout_rate', cfg['hyperparameters']['dropout_rate']),
+        'activation_function': trial.suggest_categorical('activation_function', cfg['hyperparameters']['activation_function']),
+        'optimizer': trial.suggest_categorical('optimizer', cfg['hyperparameters']['optimizer']),
         'model_type': model_type
     }
-    
+
     try:
         # K-fold cross-validation
         k_folds = cfg['cross_validation']['k_folds']
@@ -175,6 +197,7 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
             
             model = model.to(device)
             
+            check_mem()
             # Loss function
             criterion = nn.BCELoss()
             
