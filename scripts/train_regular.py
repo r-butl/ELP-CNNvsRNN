@@ -184,7 +184,7 @@ def train_model(model_type, config_path, best_config_path=None):
                 labels = labels.to(device)
                 
                 # Forward pass
-                outputs = model(inputs).squeeze()
+                outputs = model(inputs).squeeze(-1)
                 loss = criterion(outputs, labels)
                 
                 # Scale loss for gradient accumulation
@@ -221,7 +221,7 @@ def train_model(model_type, config_path, best_config_path=None):
                     inputs = inputs.to(device)
                     labels = labels.to(device)
                     
-                    outputs = model(inputs).squeeze()
+                    outputs = model(inputs).squeeze(-1)
                     loss = criterion(outputs, labels)
                     
                     val_loss += loss.item() * inputs.size(0)
