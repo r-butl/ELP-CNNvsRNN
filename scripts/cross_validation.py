@@ -98,31 +98,16 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
         model.train()
         train_loss = 0.0
         
+        print(f"Epoch: {epoch}")
         optimizer.zero_grad()  # Zero gradients at start
-        
         for batch_idx, (inputs, labels) in enumerate(train_loader):
-            # Check memory after first batch load
-            if first_batch:
-                print(f"    First batch shape: {inputs.shape}, dtype: {inputs.dtype}")
-                print(f"    Batch memory: {inputs.element_size() * inputs.nelement() / (1024**3):.3f} GB")
-            
+
             inputs = inputs.to(device)
             labels = labels.to(device)
-            
-            # Check memory after moving to device
-            if first_batch:
-                print("    Memory after loading first batch to GPU:")
-                check_mem()
             
             # Forward pass
             outputs = model(inputs).squeeze()
             loss = criterion(outputs, labels)
-            
-            # Check memory after forward pass
-            if first_batch:
-                print("    Memory after forward pass:")
-                check_mem()
-                first_batch = False
             
             # Scale loss for gradient accumulation
             loss = loss / accumulation_steps
@@ -249,7 +234,6 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
             
             # Check memory BEFORE training (after all setup)
             print("    Memory before training:")
-            check_mem()
             
             # Train and evaluate with gradient accumulation
             # Effective batch = config['batch_size'] * 8
@@ -355,13 +339,6 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     all_labels = [dataset[i][1].item() for i in range(len(dataset))]
     total_pos = sum(all_labels)
     print(f"Overall class distribution: {total_pos}/{len(all_labels)} positive ({total_pos/len(all_labels)*100:.1f}%)")
-    
-    # Check if data is ordered by class (first 10 and last 10 labels)
-    print(f"First 10 labels: {all_labels[:10]}")
-    print(f"Last 10 labels: {all_labels[-10:]}")
-    
-    print(f"Input shape (HWC format): {input_shape}")
-    print(f"Dataset size: {dataset_size}")
     
     # Create output directory
     output_dir = os.path.join(cfg['output']['cross_validation_dir'], f'{model_type}_cv_results')
