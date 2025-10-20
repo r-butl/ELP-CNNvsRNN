@@ -232,9 +232,6 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             
-            # Check memory BEFORE training (after all setup)
-            print("    Memory before training:")
-            
             # Train and evaluate with gradient accumulation
             # Effective batch = config['batch_size'] * 8
             # e.g., batch=4 * 8 = effective batch of 32 (like TensorFlow!)
@@ -305,6 +302,51 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
         raise
 
 
+def save_best_config(study, model_type, output_dir, cfg):
+    """Helper function to save the best configuration from the study"""
+    # Get best trial
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    if len(completed_trials) == 0:
+        return None
+    
+    best_params = study.best_params
+    best_value = study.best_value
+    
+    # Convert to config dict
+    best_config = {
+        'model_type': model_type,
+        'learning_rate': best_params['learning_rate'],
+        'learning_rate_decay_steps': best_params['learning_rate_decay_steps'],
+        'learning_rate_decay': best_params['learning_rate_decay'],
+        'momentum': best_params['momentum'],
+        'batch_size': best_params['batch_size'],
+        'epochs': cfg['cross_validation']['max_epochs'],
+        'dropout_rate': best_params['dropout_rate'],
+        'activation_function': best_params['activation_function'],
+        'optimizer': best_params['optimizer']
+    }
+    
+    # Save best configuration
+    best_config_dir = os.path.join(output_dir, f'{model_type}_best_config')
+    os.makedirs(best_config_dir, exist_ok=True)
+    
+    with open(os.path.join(best_config_dir, 'best_config.json'), 'w') as f:
+        json.dump(best_config, f, indent=2)
+    
+    # Save study results
+    results = {
+        'best_params': best_params,
+        'best_value': best_value,
+        'n_trials': len(study.trials),
+        'n_completed': len(completed_trials)
+    }
+    
+    with open(os.path.join(output_dir, 'study_results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    return best_config
+
+
 def run_cross_validation(model_type, config_path='config.yaml'):
     """Run cross-validation for a specific model type using Optuna"""
     
@@ -355,10 +397,18 @@ def run_cross_validation(model_type, config_path='config.yaml'):
         load_if_exists=True
     )
     
+    # Define callback to save best config after each trial
+    def save_callback(study, trial):
+        """Save best configuration after each successful trial"""
+        if trial.state == optuna.trial.TrialState.COMPLETE:
+            save_best_config(study, model_type, output_dir, cfg)
+            print(f"  💾 Best config saved (current best accuracy: {study.best_value:.4f})")
+    
     print("\nStarting hyperparameter search with Optuna...")
     print(f"Number of trials: {cfg['cross_validation']['num_trials']}")
     print(f"K-folds: {cfg['cross_validation']['k_folds']}")
     print(f"Max epochs per fold: {cfg['cross_validation']['max_epochs']}")
+    print(f"Note: Best config will be saved after each successful trial")
     
     # Run optimization with exception handling
     try:
@@ -366,6 +416,7 @@ def run_cross_validation(model_type, config_path='config.yaml'):
             lambda trial: objective(trial, model_type, dataset, input_shape, cfg, device),
             n_trials=cfg['cross_validation']['num_trials'],
             show_progress_bar=True,
+            callbacks=[save_callback],
             catch=(torch.cuda.OutOfMemoryError, RuntimeError)  # Continue on OOM and CUDA errors
         )
     except KeyboardInterrupt:
@@ -381,50 +432,18 @@ def run_cross_validation(model_type, config_path='config.yaml'):
         print("   3. Input data too large - check data dimensions")
         raise RuntimeError("Cross-validation failed - no successful trials")
     
-    # Get best hyperparameters
-    best_params = study.best_params
-    best_value = study.best_value
-    
-    # Convert to config dict
-    best_config = {
-        'model_type': model_type,
-        'learning_rate': best_params['learning_rate'],
-        'learning_rate_decay_steps': best_params['learning_rate_decay_steps'],
-        'learning_rate_decay': best_params['learning_rate_decay'],
-        'momentum': best_params['momentum'],
-        'batch_size': best_params['batch_size'],
-        'epochs': cfg['cross_validation']['max_epochs'],
-        'dropout_rate': best_params['dropout_rate'],
-        'activation_function': best_params['activation_function'],
-        'optimizer': best_params['optimizer']
-    }
-    
-    # Save best configuration
-    best_config_dir = os.path.join(output_dir, f'{model_type}_best_config')
-    os.makedirs(best_config_dir, exist_ok=True)
-    
-    with open(os.path.join(best_config_dir, 'best_config.json'), 'w') as f:
-        json.dump(best_config, f, indent=2)
-    
-    # Save study results
-    results = {
-        'best_params': best_params,
-        'best_value': best_value,
-        'n_trials': len(study.trials)
-    }
-    
-    with open(os.path.join(output_dir, 'study_results.json'), 'w') as f:
-        json.dump(results, f, indent=2)
+    # Save final best configuration (in case callback didn't run on last trial)
+    best_config = save_best_config(study, model_type, output_dir, cfg)
     
     # Print results
     print(f"\n{'='*60}")
     print(f"Cross-Validation Results for {model_type}")
     print(f"{'='*60}")
-    print(f"Best validation accuracy: {best_value:.4f}")
+    print(f"Best validation accuracy: {study.best_value:.4f}")
     print(f"\nBest configuration:")
     print(json.dumps(best_config, indent=2))
     print(f"{'='*60}")
-    print(f"Results saved to: {best_config_dir}")
+    print(f"Results saved to: {os.path.join(output_dir, f'{model_type}_best_config')}")
     
     return best_config
 
