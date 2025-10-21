@@ -182,19 +182,21 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
             print(f"    Val: {val_pos}/{len(val_labels)} positive ({val_pos/len(val_labels)*100:.1f}%)")
             
             # Create data loaders
+            # Disable pin_memory for CUDA to reduce memory pressure
+            use_pin = device.type != 'cuda'
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=config['batch_size'],
                 shuffle=True,
                 num_workers=0,
-                pin_memory=True
+                pin_memory=use_pin
             )
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config['batch_size'],
                 shuffle=False,
                 num_workers=0,
-                pin_memory=True
+                pin_memory=use_pin
             )
             
             # Create model
@@ -401,8 +403,13 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     def save_callback(study, trial):
         """Save best configuration after each successful trial"""
         if trial.state == optuna.trial.TrialState.COMPLETE:
-            save_best_config(study, model_type, output_dir, cfg)
-            print(f"  💾 Best config saved (current best accuracy: {study.best_value:.4f})")
+            try:
+                save_best_config(study, model_type, output_dir, cfg)
+                print(f"  💾 Best config saved (current best accuracy: {study.best_value:.4f})")
+            except Exception as e:
+                # If saving fails (e.g., due to database locks), just log it
+                print(f"  ⚠️  Warning: Could not save config immediately: {str(e)[:50]}")
+                print(f"     (Config will be saved at the end)")
     
     print("\nStarting hyperparameter search with Optuna...")
     print(f"Number of trials: {cfg['cross_validation']['num_trials']}")
