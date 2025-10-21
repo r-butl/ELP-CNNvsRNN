@@ -106,7 +106,7 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
             labels = labels.to(device)
             
             # Forward pass
-            outputs = model(inputs).squeeze()
+            outputs = model(inputs).squeeze(-1)
             loss = criterion(outputs, labels)
             
             # Scale loss for gradient accumulation
@@ -130,7 +130,7 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
                 inputs = inputs.to(device)
                 labels = labels.to(device)
                 
-                outputs = model(inputs).squeeze()
+                outputs = model(inputs).squeeze(-1)
                 predictions = (outputs > 0.5).float()
                 val_correct += (predictions == labels).sum().item()
                 val_total += labels.size(0)
