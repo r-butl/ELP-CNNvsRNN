@@ -81,17 +81,21 @@ def k_fold_split(dataset, num_folds, fold_idx):
     return train_dataset, val_dataset
 
 
-def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterion, device, epochs=15, accumulation_steps=8):
+def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterion, device, epochs=15, accumulation_steps=8, patience=5):
     """
     Train model on one fold and return validation accuracy
     Uses gradient accumulation to simulate larger batch sizes
+    Implements early stopping based on validation accuracy
     
     Args:
         accumulation_steps: Number of batches to accumulate (default 8)
                           effective_batch = actual_batch * accumulation_steps
                           e.g., batch=4 * accum=8 = effective batch of 32
+        patience: Number of epochs to wait for improvement before stopping (default 5)
     """
-    first_batch = True
+    best_val_accuracy = 0.0
+    best_model_state = None
+    epochs_without_improvement = 0
     
     for epoch in range(epochs):
         # Training
@@ -136,8 +140,29 @@ def train_and_evaluate_fold(model, train_loader, val_loader, optimizer, criterio
                 val_total += labels.size(0)
         
         val_accuracy = val_correct / val_total if val_total > 0 else 0.0
+        print(f"  Val Accuracy: {val_accuracy:.4f}")
+        
+        # Early stopping logic
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            epochs_without_improvement = 0
+            print(f"  ✓ New best accuracy!")
+        else:
+            epochs_without_improvement += 1
+            print(f"  No improvement for {epochs_without_improvement} epoch(s)")
+        
+        # Stop if no improvement for 'patience' epochs
+        if epochs_without_improvement >= patience:
+            print(f"  Early stopping triggered after {epoch + 1} epochs")
+            break
     
-    return val_accuracy
+    # Restore best model weights
+    if best_model_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_model_state.items()})
+        print(f"  Restored best model (accuracy: {best_val_accuracy:.4f})")
+    
+    return best_val_accuracy
 
 
 def objective(trial, model_type, dataset, input_shape, cfg, device):
@@ -234,13 +259,15 @@ def objective(trial, model_type, dataset, input_shape, cfg, device):
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             
-            # Train and evaluate with gradient accumulation
+            # Train and evaluate with gradient accumulation and early stopping
             # Effective batch = config['batch_size'] * 8
             # e.g., batch=4 * 8 = effective batch of 32 (like TensorFlow!)
+            patience = cfg['cross_validation'].get('early_stopping_patience', 5)
             val_accuracy = train_and_evaluate_fold(
                 model, train_loader, val_loader, optimizer, criterion, device,
                 epochs=cfg['cross_validation']['max_epochs'],
-                accumulation_steps=8
+                accumulation_steps=8,
+                patience=patience
             )
             
             fold_scores.append(val_accuracy)
@@ -415,6 +442,7 @@ def run_cross_validation(model_type, config_path='config.yaml'):
     print(f"Number of trials: {cfg['cross_validation']['num_trials']}")
     print(f"K-folds: {cfg['cross_validation']['k_folds']}")
     print(f"Max epochs per fold: {cfg['cross_validation']['max_epochs']}")
+    print(f"Early stopping patience: {cfg['cross_validation'].get('early_stopping_patience', 5)} epochs")
     print(f"Note: Best config will be saved after each successful trial")
     
     # Run optimization with exception handling

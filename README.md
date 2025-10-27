@@ -95,7 +95,16 @@ module list
 Here is an example command you can use to launch a bash terminal with GPU allocation. 
 
 ```
-srun --partition=gpu-shared --gpus=1 --pty --account=cso100 --nodes=1 --ntasks-per-node=4 --mem=8G -t 00:30:00 --export=ALL singularity exec --bind /expanse,/scratch,/usr/share/lmod:/usr/share/lmod,/usr/bin/lua:/usr/bin/lua --nv ./train-container-sandbox /bin/bash
+srun --partition=gpu-shared --gpus=1 --pty --account=cso100 --nodes=1 --ntasks-per-node=4 --mem=8G -t 04:00:00 --export=ALL singularity exec --bind /expanse,/scratch,/usr/share/lmod:/usr/share/lmod,/usr/bin/lua:/usr/bin/lua --nv ./train-container-sandbox /bin/bash
+```
+
+```
+sbatch --partition=gpu-shared --gpus=1 --account=cso100 --nodes=1 --ntasks-per-node=4 --mem=32G -t 06:00:00 --export=ALL singularity exec --bind /expanse,/scratch,/usr/share/lmod:/usr/share/lmod,/usr/bin/lua:/usr/bin/lua --nv ./train-container-sandbox python scripts/cross_validation.py --model mobilenetv2 --config config.yaml
+```
+
+Train:
+```
+python scripts/train_regular.py --model resnet18 --config config.yaml --best_config /home/lbutler2/ELP-CNN-Spectrogram/cross_validation_results/resnet18_cv_results/resnet18_best_config/best_config.json  
 ```
 
 # Queueing a Job

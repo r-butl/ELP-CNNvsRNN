@@ -190,6 +190,11 @@ def train_qat_model(model_type, config_path, best_config_path=None):
                 
                 # Forward pass
                 outputs = qat_model(inputs).squeeze()
+                # Ensure labels and outputs have the same shape
+                if labels.dim() > outputs.dim():
+                    labels = labels.squeeze()
+                elif outputs.dim() > labels.dim():
+                    outputs = outputs.unsqueeze(-1)
                 loss = criterion(outputs, labels)
                 
                 # Scale loss for gradient accumulation
@@ -230,6 +235,11 @@ def train_qat_model(model_type, config_path, best_config_path=None):
                     labels = labels.to(device)
                     
                     outputs = qat_model(inputs).squeeze()
+                    # Ensure labels and outputs have the same shape
+                    if labels.dim() > outputs.dim():
+                        labels = labels.squeeze()
+                    elif outputs.dim() > labels.dim():
+                        outputs = outputs.unsqueeze(-1)
                     loss = criterion(outputs, labels)
                     
                     val_loss += loss.item() * inputs.size(0)

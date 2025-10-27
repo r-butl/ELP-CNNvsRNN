@@ -18,6 +18,7 @@ quantization_methods:
 cross_validation:
   k_folds: 5
   max_epochs: 15
+  early_stopping_patience: 5  # Stop training if no improvement for N epochs
   num_trials: 30
   max_concurrent_trials: 2
 

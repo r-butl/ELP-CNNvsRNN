@@ -62,7 +62,7 @@ tensorboard --logdir training_run_mobilenetv2_regular_*/logs
 python scripts/cross_validation.py --model mobilenetv2
 
 # 2. Train regular model
-python scripts/train_regular.py --model mobilenetv2
+python scripts/train_regular.py --model mobilenetv2 --best_config <path> --config config.yaml
 
 # 3. Train with Quantization-Aware Training
 python scripts/train_qat.py --model mobilenetv2
