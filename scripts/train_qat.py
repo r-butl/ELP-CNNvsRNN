@@ -39,8 +39,17 @@ def get_device():
     return torch.device("cpu")
 
 
-def train_qat_model(model_type, config_path, best_config_path=None):
-    """Train a model with Quantization Aware Training"""
+def train_qat_model(model_type, config_path, best_config_path=None, pretrained_model_path=None):
+    """Train a model with Quantization Aware Training
+    
+    Args:
+        model_type: Type of model ('mobilenetv2' or 'resnet18')
+        config_path: Path to configuration file
+        best_config_path: Path to best configuration from cross-validation
+        pretrained_model_path: Path to pre-trained model weights (optional)
+                              If provided, QAT will start from these weights
+                              If None, QAT will start from scratch
+    """
     
     # Load configuration
     with open(config_path, 'r') as f:
@@ -65,8 +74,22 @@ def train_qat_model(model_type, config_path, best_config_path=None):
     with open(best_config_path, 'r') as f:
         best_config = json.load(f)
     
-    print(f"Training {model_type} with QAT using configuration:")
-    print(json.dumps(best_config, indent=2))
+    # Determine training mode
+    if pretrained_model_path and os.path.exists(pretrained_model_path):
+        training_mode = "QAT from pre-trained model"
+        print(f"Training {model_type} with QAT from pre-trained model:")
+        print(f"  Pre-trained model: {pretrained_model_path}")
+        print(f"  ✅ Pre-trained model file found and will be loaded")
+    else:
+        training_mode = "QAT from scratch"
+        print(f"Training {model_type} with QAT from scratch:")
+        if pretrained_model_path:
+            print(f"  ❌ Pre-trained model not found at: {pretrained_model_path}")
+            print(f"  Continuing with QAT from scratch...")
+        else:
+            print(f"  No pre-trained model specified, starting from scratch")
+    
+    print(f"  Configuration: {json.dumps(best_config, indent=2)}")
     
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -124,7 +147,50 @@ def train_qat_model(model_type, config_path, best_config_path=None):
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
+    # Load pre-trained weights if provided
+    if pretrained_model_path and os.path.exists(pretrained_model_path):
+        print(f"Loading pre-trained weights from: {pretrained_model_path}")
+        try:
+            # Load the pre-trained weights
+            pretrained_state_dict = torch.load(pretrained_model_path, map_location='cpu')
+            
+            # Filter out any quantization-specific keys that might not match
+            filtered_state_dict = {}
+            for key, value in pretrained_state_dict.items():
+                # Skip quantization-specific keys that might not exist in the base model
+                if not any(qat_key in key for qat_key in ['_packed_params', 'scale', 'zero_point', 'activation_post_process']):
+                    filtered_state_dict[key] = value
+            
+            # Load the filtered weights
+            missing_keys, unexpected_keys = qat_model.load_state_dict(filtered_state_dict, strict=False)
+            
+            if missing_keys:
+                print(f"  ⚠️  Missing keys (will use random initialization): {len(missing_keys)}")
+                if len(missing_keys) <= 5:  # Only show details if few missing keys
+                    for key in missing_keys:
+                        print(f"    - {key}")
+                else:
+                    print(f"    - {missing_keys[0]} ... and {len(missing_keys)-1} more")
+            
+            if unexpected_keys:
+                print(f"  ⚠️  Unexpected keys (ignored): {len(unexpected_keys)}")
+                if len(unexpected_keys) <= 5:  # Only show details if few unexpected keys
+                    for key in unexpected_keys:
+                        print(f"    - {key}")
+                else:
+                    print(f"    - {unexpected_keys[0]} ... and {len(unexpected_keys)-1} more")
+            
+            print("  ✅ Pre-trained weights loaded successfully")
+            
+        except Exception as e:
+            print(f"  ❌ Error loading pre-trained weights: {e}")
+            print(f"  Continuing with QAT from scratch...")
+            training_mode = "QAT from scratch (pre-trained loading failed)"
+    else:
+        print("Starting QAT from scratch (no pre-trained model provided)")
+    
     # Prepare model for QAT
+    print(f"\nPreparing model for QAT ({training_mode})...")
     qat_model = prepare_qat(qat_model.model)
     qat_model = qat_model.to(device)
     
@@ -156,6 +222,7 @@ def train_qat_model(model_type, config_path, best_config_path=None):
     
     # Training loop
     print(f"\nStarting QAT training...")
+    print(f"  Training mode: {training_mode}")
     print(f"  Max epochs: {cfg['quantization']['qat_epochs']}")
     print(f"  Batch size: {best_config['batch_size']}")
     print(f"  Learning rate: {qat_lr} (lower for QAT)")
@@ -355,8 +422,11 @@ def train_qat_model(model_type, config_path, best_config_path=None):
     
     # Save model configuration
     config_file = os.path.join(run_folder, 'qat_model_config.json')
+    config_to_save = best_config.copy()
+    config_to_save['training_mode'] = training_mode
+    config_to_save['pretrained_model_path'] = pretrained_model_path if pretrained_model_path else None
     with open(config_file, 'w') as f:
-        json.dump(best_config, f, indent=2)
+        json.dump(config_to_save, f, indent=2)
     
     # Save training history to CSV
     csv_file = os.path.join(run_folder, 'qat_training_results.csv')
@@ -403,9 +473,17 @@ if __name__ == "__main__":
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
     parser.add_argument("--config", default="config.yaml", help="Configuration file")
     parser.add_argument("--best_config", default=None, help="Path to best configuration from CV")
+    parser.add_argument("--pretrained_model", default=None, help="Path to pre-trained model weights (optional). If provided, QAT will start from these weights. If not provided, QAT will start from scratch.")
     
     args = parser.parse_args()
     
+    # Validate pre-trained model path if provided
+    pretrained_model_path = args.pretrained_model
+    if pretrained_model_path and not os.path.exists(pretrained_model_path):
+        print(f"⚠️  Warning: Pre-trained model path does not exist: {pretrained_model_path}")
+        print("   Will continue with QAT from scratch")
+        pretrained_model_path = None
+    
     # Run QAT training
-    output_folder = train_qat_model(args.model, args.config, args.best_config)
+    output_folder = train_qat_model(args.model, args.config, args.best_config, pretrained_model_path)
     print(f"\n✅ QAT training completed. Output folder: {output_folder}")
