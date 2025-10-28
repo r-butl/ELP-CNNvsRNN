@@ -37,19 +37,55 @@ def get_device():
 
 
 def evaluate_model(model_type, model_path, config_path, test_type="regular"):
-    """Evaluate a trained model on test data"""
+    """Evaluate a trained model on test data
+    
+    Args:
+        model_type: Type of model ('mobilenetv2' or 'resnet18')
+        model_path: Path to model file (.pth) or directory containing model files
+        config_path: Path to configuration file
+        test_type: Type of model to test ('regular', 'qat', 'ptq')
+    """
     
     # Load configuration
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    # Load model configuration
-    config_file = os.path.join(model_path, 'model_config.json')
-    if not os.path.exists(config_file):
-        config_file = os.path.join(model_path, 'qat_model_config.json')
+    # Determine if model_path is a file or directory
+    if os.path.isfile(model_path):
+        # Direct model file provided
+        model_file = model_path
+        model_dir = os.path.dirname(model_path)
+        print(f"Testing direct model file: {model_file}")
+    else:
+        # Directory provided (original behavior)
+        model_dir = model_path
+        print(f"Testing model from directory: {model_dir}")
     
-    with open(config_file, 'r') as f:
-        model_config = json.load(f)
+    # Load model configuration
+    # First try to use the provided config file if it's a direct path
+    if config_path and os.path.isfile(config_path):
+        print(f"Using provided config file: {config_path}")
+        with open(config_path, 'r') as f:
+            model_config = json.load(f)
+    else:
+        # Look for config files in the model directory
+        config_file = os.path.join(model_dir, 'model_config.json')
+        if not os.path.exists(config_file):
+            config_file = os.path.join(model_dir, 'qat_model_config.json')
+        
+        if not os.path.exists(config_file):
+            print(f"⚠️  Warning: No model config found in {model_dir}")
+            print("   Using default configuration...")
+            # Use a default config if none found
+            model_config = {
+                'activation_function': 'ReLU',
+                'dropout_rate': 0.2,
+                'batch_size': 32
+            }
+        else:
+            print(f"Using config file: {config_file}")
+            with open(config_file, 'r') as f:
+                model_config = json.load(f)
     
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -84,6 +120,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     
     # Load model based on test type
     print(f"\nLoading {test_type} model...")
+    
     if test_type == "regular":
         if model_type == 'mobilenetv2':
             model = MobileNetV2Model(
@@ -98,10 +135,20 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
                 input_shape=input_shape
             )
         
-        weights_path = os.path.join(model_path, f'{model_type}_model_best.pth')
-        if not os.path.exists(weights_path):
-            weights_path = os.path.join(model_path, f'{model_type}_model_final_weights.pth')
+        # Determine weights path
+        if 'model_file' in locals():
+            # Direct model file provided
+            weights_path = model_file
+        else:
+            # Directory provided - look for weights
+            weights_path = os.path.join(model_dir, f'{model_type}_model_best.pth')
+            if not os.path.exists(weights_path):
+                weights_path = os.path.join(model_dir, f'{model_type}_model_final_weights.pth')
         
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Model weights not found: {weights_path}")
+        
+        print(f"Loading weights from: {weights_path}")
         model.load_state_dict(torch.load(weights_path, map_location=device))
         model = model.to(device)
         
@@ -120,16 +167,38 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
                 input_shape=input_shape
             )
         
-        weights_path = os.path.join(model_path, f'{model_type}_qat_model_best.pth')
-        if not os.path.exists(weights_path):
-            weights_path = os.path.join(model_path, f'{model_type}_qat_model_final_weights.pth')
+        # Determine weights path
+        if 'model_file' in locals():
+            # Direct model file provided
+            weights_path = model_file
+        else:
+            # Directory provided - look for QAT weights
+            weights_path = os.path.join(model_dir, f'{model_type}_qat_model_best.pth')
+            if not os.path.exists(weights_path):
+                weights_path = os.path.join(model_dir, f'{model_type}_qat_model_final_weights.pth')
         
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"QAT model weights not found: {weights_path}")
+        
+        print(f"Loading QAT weights from: {weights_path}")
         model.load_state_dict(torch.load(weights_path, map_location=device))
         model = model.to(device)
         
     elif test_type == "ptq":
         # Load fully quantized model
-        quantized_path = os.path.join(model_path, f'{model_type}_quantized_model_complete.pth')
+        if 'model_file' in locals():
+            # Direct model file provided
+            quantized_path = model_file
+        else:
+            # Directory provided - look for quantized model
+            quantized_path = os.path.join(model_dir, f'{model_type}_quantized_model_complete.pth')
+            if not os.path.exists(quantized_path):
+                quantized_path = os.path.join(model_dir, f'{model_type}_quantized_model_final.pth')
+        
+        if not os.path.exists(quantized_path):
+            raise FileNotFoundError(f"Quantized model not found: {quantized_path}")
+        
+        print(f"Loading quantized model from: {quantized_path}")
         model = torch.load(quantized_path, map_location=device)
         model = model.to(device)
     
@@ -266,9 +335,9 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Model testing and evaluation with PyTorch")
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
-    parser.add_argument("--model_path", required=True, help="Path to trained model directory")
+    parser.add_argument("--model_path", required=True, help="Path to trained model file (.pth) or directory containing model files")
     parser.add_argument("--test_type", choices=["regular", "qat", "ptq"], required=True, help="Type of model to test")
-    parser.add_argument("--config", default="config.yaml", help="Configuration file")
+    parser.add_argument("--config", default="config.yaml", help="Configuration file (can be a specific model config JSON or the main config.yaml)")
     
     args = parser.parse_args()
     
