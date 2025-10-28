@@ -62,11 +62,30 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         print(f"Testing model from directory: {model_dir}")
     
     # Load model configuration
+    def load_config_file(file_path):
+        """Load configuration file, handling both JSON and YAML formats"""
+        with open(file_path, 'r') as f:
+            if file_path.endswith('.yaml') or file_path.endswith('.yml'):
+                return yaml.safe_load(f)
+            else:
+                return json.load(f)
+    
     # First try to use the provided config file if it's a direct path
     if config_path and os.path.isfile(config_path):
         print(f"Using provided config file: {config_path}")
-        with open(config_path, 'r') as f:
-            model_config = json.load(f)
+        try:
+            model_config = load_config_file(config_path)
+        except Exception as e:
+            print(f"⚠️  Error loading config file {config_path}: {e}")
+            print("   Using default configuration...")
+            model_config = {
+                'activation_function': 'ReLU',
+                'dropout_rate': 0.2,
+                'batch_size': 32
+            }
+    elif config_path:
+        print(f"⚠️  Config file not found: {config_path}")
+        print("   Looking for config in model directory...")
     else:
         # Look for config files in the model directory
         config_file = os.path.join(model_dir, 'model_config.json')
@@ -84,8 +103,11 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             }
         else:
             print(f"Using config file: {config_file}")
-            with open(config_file, 'r') as f:
-                model_config = json.load(f)
+            try:
+                model_config = load_config_file(config_file)
+            except Exception as e:
+                print(f"⚠️  Error loading config file {config_file}: {e}")
+                exit()
     
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
