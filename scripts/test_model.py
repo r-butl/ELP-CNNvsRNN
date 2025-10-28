@@ -17,6 +17,12 @@ from datetime import datetime
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, roc_curve, precision_recall_curve
 import matplotlib.pyplot as plt
 import seaborn as sns
+import warnings
+import logging
+
+# Suppress verbose PyTorch output
+warnings.filterwarnings("ignore")
+logging.getLogger("torch").setLevel(logging.ERROR)
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -91,7 +97,11 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         except Exception as e:
             print(f"⚠️  Error loading model config file {model_config_file}: {e}")
             print("   Using default configuration...")
-            exit()
+            model_config = {
+                'activation_function': 'ReLU',
+                'dropout_rate': 0.2,
+                'batch_size': 32
+            }
                 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -187,7 +197,15 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             raise FileNotFoundError(f"QAT model weights not found: {weights_path}")
         
         print(f"Loading QAT weights from: {weights_path}")
-        model.load_state_dict(torch.load(weights_path, map_location=device))
+        # Load state dict with strict=False to handle quantization parameters gracefully
+        missing_keys, unexpected_keys = model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
+        
+        # Only show summary of missing/unexpected keys if there are any
+        if missing_keys:
+            print(f"  ⚠️  {len(missing_keys)} missing keys (quantization parameters)")
+        if unexpected_keys:
+            print(f"  ⚠️  {len(unexpected_keys)} unexpected keys (quantization parameters)")
+        
         model = model.to(device)
         
     elif test_type == "ptq":
