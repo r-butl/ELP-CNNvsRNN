@@ -42,11 +42,11 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     Args:
         model_type: Type of model ('mobilenetv2' or 'resnet18')
         model_path: Path to model file (.pth) or directory containing model files
-        config_path: Path to configuration file
+        config_path: Path to main configuration file (for data paths, etc.)
         test_type: Type of model to test ('regular', 'qat', 'ptq')
     """
     
-    # Load configuration
+    # Load main configuration (for data paths, etc.)
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
@@ -61,7 +61,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         model_dir = model_path
         print(f"Testing model from directory: {model_dir}")
     
-    # Load model configuration
+    # Load model configuration from the model directory
     def load_config_file(file_path):
         """Load configuration file, handling both JSON and YAML formats"""
         with open(file_path, 'r') as f:
@@ -70,45 +70,29 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             else:
                 return json.load(f)
     
-    # First try to use the provided config file if it's a direct path
-    if config_path and os.path.isfile(config_path):
-        print(f"Using provided config file: {config_path}")
-        try:
-            model_config = load_config_file(config_path)
-        except Exception as e:
-            print(f"⚠️  Error loading config file {config_path}: {e}")
-            print("   Using default configuration...")
-            model_config = {
-                'activation_function': 'ReLU',
-                'dropout_rate': 0.2,
-                'batch_size': 32
-            }
-    elif config_path:
-        print(f"⚠️  Config file not found: {config_path}")
-        print("   Looking for config in model directory...")
-    else:
-        # Look for config files in the model directory
-        config_file = os.path.join(model_dir, 'model_config.json')
-        if not os.path.exists(config_file):
-            config_file = os.path.join(model_dir, 'qat_model_config.json')
-        
-        if not os.path.exists(config_file):
-            print(f"⚠️  Warning: No model config found in {model_dir}")
-            print("   Using default configuration...")
-            # Use a default config if none found
-            model_config = {
-                'activation_function': 'ReLU',
-                'dropout_rate': 0.2,
-                'batch_size': 32
-            }
-        else:
-            print(f"Using config file: {config_file}")
-            try:
-                model_config = load_config_file(config_file)
-            except Exception as e:
-                print(f"⚠️  Error loading config file {config_file}: {e}")
-                exit()
+    # Look for model config files in the model directory
+    model_config_file = os.path.join(model_dir, 'model_config.json')
+    if not os.path.exists(model_config_file):
+        model_config_file = os.path.join(model_dir, 'qat_model_config.json')
     
+    if not os.path.exists(model_config_file):
+        print(f"⚠️  Warning: No model config found in {model_dir}")
+        print("   Using default configuration...")
+        # Use a default config if none found
+        model_config = {
+            'activation_function': 'ReLU',
+            'dropout_rate': 0.2,
+            'batch_size': 32
+        }
+    else:
+        print(f"Using model config file: {model_config_file}")
+        try:
+            model_config = load_config_file(model_config_file)
+        except Exception as e:
+            print(f"⚠️  Error loading model config file {model_config_file}: {e}")
+            print("   Using default configuration...")
+            exit()
+                
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_folder = f"test_results_{model_type}_{test_type}_{timestamp}"
@@ -359,7 +343,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
     parser.add_argument("--model_path", required=True, help="Path to trained model file (.pth) or directory containing model files")
     parser.add_argument("--test_type", choices=["regular", "qat", "ptq"], required=True, help="Type of model to test")
-    parser.add_argument("--config", default="config.yaml", help="Configuration file (can be a specific model config JSON or the main config.yaml)")
+    parser.add_argument("--config", default="config.yaml", help="Main configuration file (for data paths, etc.)")
     
     args = parser.parse_args()
     
