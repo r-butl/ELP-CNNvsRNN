@@ -28,8 +28,8 @@ logging.getLogger("torch").setLevel(logging.ERROR)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import read_tfrecords, create_dataloader
-from models.mobilenetv2_model import MobileNetV2Model
-from models.resnet18_model import ResNet18Model
+from models.mobilenetv2_model import MobileNetV2Model, QuantizedMobileNetV2Model
+from models.resnet18_model import ResNet18Model, QuantizedResNet18Model
 
 
 def get_device():
@@ -223,8 +223,41 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             raise FileNotFoundError(f"Quantized model not found: {quantized_path}")
         
         print(f"Loading quantized model from: {quantized_path}")
-        model = torch.load(quantized_path, map_location=device)
-        model = model.to(device)
+        try:
+            # Try loading with weights_only=False for complete models
+            model = torch.load(quantized_path, map_location=device, weights_only=False)
+            model = model.to(device)
+        except Exception as e:
+            if "weights_only" in str(e) or "Unsupported global" in str(e):
+                print("  ⚠️  Complete model loading failed, trying to load as state_dict...")
+                # Fallback: try to load as state_dict and create model architecture
+                try:
+                    # Load the state dict
+                    state_dict = torch.load(quantized_path, map_location=device, weights_only=True)
+                    
+                    # Create model architecture
+                    if model_type == 'mobilenetv2':
+                        model = QuantizedMobileNetV2Model(
+                            model_config=model_config,
+                            training=False,
+                            input_shape=input_shape
+                        )
+                    elif model_type == 'resnet18':
+                        model = QuantizedResNet18Model(
+                            model_config=model_config,
+                            training=False,
+                            input_shape=input_shape
+                        )
+                    
+                    # Load the state dict
+                    model.load_state_dict(state_dict)
+                    model = model.to(device)
+                    print("  ✅ Successfully loaded as state_dict")
+                except Exception as e2:
+                    print(f"  ❌ Failed to load as state_dict: {e2}")
+                    raise e  # Re-raise original error
+            else:
+                raise e
     
     model.eval()
     
