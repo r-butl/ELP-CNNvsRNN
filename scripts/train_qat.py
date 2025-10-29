@@ -262,6 +262,13 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                     labels = labels.squeeze()
                 elif outputs.dim() > labels.dim():
                     outputs = outputs.unsqueeze(-1)
+                
+                # Ensure both tensors have at least 1 dimension for loss calculation
+                if outputs.dim() == 0:
+                    outputs = outputs.unsqueeze(0)
+                if labels.dim() == 0:
+                    labels = labels.unsqueeze(0)
+                
                 loss = criterion(outputs, labels)
                 
                 # Scale loss for gradient accumulation
@@ -307,6 +314,13 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                         labels = labels.squeeze()
                     elif outputs.dim() > labels.dim():
                         outputs = outputs.unsqueeze(-1)
+                    
+                    # Ensure both tensors have at least 1 dimension for loss calculation
+                    if outputs.dim() == 0:
+                        outputs = outputs.unsqueeze(0)
+                    if labels.dim() == 0:
+                        labels = labels.unsqueeze(0)
+                    
                     loss = criterion(outputs, labels)
                     
                     val_loss += loss.item() * inputs.size(0)
