@@ -81,30 +81,33 @@ class QuantizationUtils:
         model.eval()
         model.to(device)
         
-        # Set quantization config for PTQ (qnnpack backend for mobile/ARM)
-        model.qconfig = get_default_qconfig('qnnpack')
+        # Set quantization config for PTQ
+        # Use 'qnnpack' for ARM CPUs (like Apple Silicon), 'fbgemm' for x86 CPUs
+        # Default to 'qnnpack' as it's more commonly used and works well on ARM
+        backend = 'qnnpack'  # Change to 'fbgemm' for x86 CPUs if needed
+        model.qconfig = torch.quantization.get_default_qconfig(backend)
         
-        # Prepare model for quantization
+        # Prepare model for quantization (inplace operation)
         print("Preparing model for quantization...")
-        model_prepared = prepare(model)
+        torch.quantization.prepare(model, inplace=True)
         
         # Run calibration data through the model
         print("Running calibration data through model...")
-        model_prepared.eval()
+        model.eval()
         with torch.no_grad():
             for batch_idx, (inputs, labels) in enumerate(calibration_loader):
                 inputs = inputs.to(device)
-                _ = model_prepared(inputs)
+                _ = model(inputs)
                 
                 if (batch_idx + 1) % 10 == 0:
                     print(f"  Processed {batch_idx + 1} batches...")
         
-        # Convert to quantized model
+        # Convert to quantized model (inplace operation)
         print("Converting to quantized model...")
-        model_quantized = convert(model_prepared)
+        torch.quantization.convert(model, inplace=True)
         
         print("✓ Quantization complete!")
-        return model_quantized
+        return model
     
     @staticmethod
     def create_calibration_loader(dataset_path, num_samples=200, batch_size=16):
