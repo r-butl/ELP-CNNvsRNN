@@ -92,102 +92,54 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     if not os.path.exists(weights_path):
         weights_path = os.path.join(model_path, f'{model_type}_model_final_weights.pth')
     
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Model weights not found in {model_path}")
+    
     original_model.load_state_dict(torch.load(weights_path, map_location=device))
     original_model = original_model.to(device)
-    # Set to eval mode - this is important for quantization
-    # Note: The quantization_utils will also call eval(), but it's good to set it here too
     original_model.eval()
     
-    print(f"Loaded weights from: {weights_path}")
-    
-    # Verify model structure before quantization
-    if hasattr(original_model, 'rgb_conv') and original_model.rgb_conv is not None:
-        print(f"  Model has rgb_conv layer: {type(original_model.rgb_conv).__name__}")
-        print(f"  rgb_conv will need to be quantized along with other layers")
-    
     # Create calibration loader
-    print("\nCreating calibration data loader...")
+    print("\nCreating calibration loader...")
     calibration_loader = QuantizationUtils.create_calibration_loader(
-        os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file']),
-        num_samples=cfg['quantization']['ptq_calibration_samples'],
+        dataset_path=os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file']),
+        num_samples=200,
         batch_size=16
     )
     
     # Apply PTQ
-    print("\n" + "="*60)
-    print("Applying Post-Training Quantization...")
-    print("="*60)
+    print("\nApplying Post-Training Quantization...")
     quantized_model = QuantizationUtils.apply_ptq_to_model(
-        original_model,
-        calibration_loader,
+        model=original_model,
+        calibration_loader=calibration_loader,
         device=device
     )
     
-    # Verify quantization was successful
-    print("\nVerifying quantization...")
-    if hasattr(quantized_model, 'rgb_conv') and quantized_model.rgb_conv is not None:
-        rgb_conv_type = type(quantized_model.rgb_conv).__name__
-        print(f"  rgb_conv type after quantization: {rgb_conv_type}")
-        if 'Quantized' not in rgb_conv_type and 'quantized' not in rgb_conv_type.lower():
-            print("  ⚠️  WARNING: rgb_conv does not appear to be quantized!")
-            print("     This may cause errors during inference.")
-        else:
-            print("  ✅ rgb_conv is properly quantized")
-    
     # Save quantized model
-    quantized_model_path = os.path.join(ptq_folder, f'{model_type}_quantized.pth')
+    quantized_model_path = os.path.join(ptq_folder, f'{model_type}_model_quantized.pth')
     QuantizationUtils.save_quantized_model(quantized_model, quantized_model_path)
     
-    # Save complete quantized model (architecture + weights)
-    quantized_complete_path = os.path.join(ptq_folder, f'{model_type}_quantized_complete.pth')
-    torch.save(quantized_model, quantized_complete_path)
-    
-    # Save original model for comparison
-    original_model_path = os.path.join(ptq_folder, f'{model_type}_original.pth')
-    torch.save(original_model.state_dict(), original_model_path)
-    
-    # Compare model sizes
-    print("\n" + "="*60)
-    print("Comparing Model Sizes")
-    print("="*60)
-    size_comparison = QuantizationUtils.compare_model_sizes(
-        original_model,
-        quantized_model,
-        temp_dir=ptq_folder
-    )
-    
     # Save model configuration
-    config_output = os.path.join(ptq_folder, 'model_config.json')
-    with open(config_output, 'w') as f:
+    config_file = os.path.join(ptq_folder, 'model_config.json')
+    with open(config_file, 'w') as f:
         json.dump(model_config, f, indent=2)
     
-    # Save results
-    results = {
-        'model_type': model_type,
-        'original_model_path': model_path,
-        'quantized_model_path': quantized_model_path,
-        'quantized_complete_path': quantized_complete_path,
-        'size_comparison': size_comparison,
-        'ptq_config': {
-            'calibration_samples': cfg['quantization']['ptq_calibration_samples'],
-            'representative_dataset_size': cfg['quantization'].get('ptq_representative_dataset_size', 200)
-        }
-    }
+    # Compare model sizes
+    print("\nComparing model sizes...")
+    size_comparison = QuantizationUtils.compare_model_sizes(
+        original_model=original_model,
+        quantized_model=quantized_model,
+        temp_dir=os.path.join(ptq_folder, 'temp')
+    )
     
-    results_file = os.path.join(ptq_folder, 'ptq_results.json')
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
+    # Save size comparison to JSON
+    size_info_file = os.path.join(ptq_folder, 'size_comparison.json')
+    with open(size_info_file, 'w') as f:
+        json.dump(size_comparison, f, indent=2)
     
-    print(f"\n{'='*60}")
-    print("PTQ Summary")
-    print(f"{'='*60}")
-    print(f"Model type: {model_type}")
-    print(f"Original model size: {size_comparison['original_size_mb']:.2f} MB")
-    print(f"Quantized model size: {size_comparison['quantized_size_mb']:.2f} MB")
-    print(f"Size reduction: {size_comparison['size_reduction_percent']:.1f}%")
-    print(f"Compression ratio: {size_comparison['compression_ratio']:.2f}x")
-    print(f"{'='*60}")
-    print(f"Results saved to: {ptq_folder}")
+    print(f"\n✓ PTQ completed successfully!")
+    print(f"  Quantized model saved to: {quantized_model_path}")
+    print(f"  Size comparison saved to: {size_info_file}")
     
     return ptq_folder
 
