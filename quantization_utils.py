@@ -83,10 +83,40 @@ class QuantizationUtils:
         os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
         
         # Set quantization config
-        model.qconfig = torch.quantization.get_default_qconfig('qnnpack')
+        qconfig = torch.quantization.get_default_qconfig('qnnpack')
+        model.qconfig = qconfig
+        
+        # IMPORTANT: Explicitly set qconfig for all modules, especially rgb_conv
+        # This ensures that all layers (including rgb_conv) are properly quantized
+        # We need to set qconfig for all quantizable operations, not just the top-level model
+        for name, module in model.named_modules():
+            # Skip QuantStub and DeQuantStub - they have their own handling
+            if isinstance(module, (torch.quantization.QuantStub, torch.quantization.DeQuantStub)):
+                continue
+            # Set qconfig for all Conv2d, Linear, and activation layers
+            if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear, torch.nn.ReLU, 
+                                 torch.nn.LeakyReLU, torch.nn.Sigmoid, torch.nn.Dropout)):
+                # Only set if not already set (QuantStub might have set it)
+                if not hasattr(module, 'qconfig') or module.qconfig is None:
+                    module.qconfig = qconfig
+        
+        # Also explicitly set qconfig for direct children that might be missed
+        # This is especially important for rgb_conv which is a direct child
+        for name, child in model.named_children():
+            if isinstance(child, torch.nn.Conv2d):
+                if not hasattr(child, 'qconfig') or child.qconfig is None:
+                    child.qconfig = qconfig
+                    print(f"  Set qconfig for direct child: {name}")
         
         # Prepare model for quantization
         model_prepared = torch.quantization.prepare(model)
+        
+        # Verify that rgb_conv was prepared (if it exists)
+        if hasattr(model_prepared, 'rgb_conv') and model_prepared.rgb_conv is not None:
+            rgb_conv_prepared = model_prepared.rgb_conv
+            print(f"  rgb_conv after prepare: {type(rgb_conv_prepared).__name__}")
+            if hasattr(rgb_conv_prepared, 'qconfig'):
+                print(f"  rgb_conv qconfig: {rgb_conv_prepared.qconfig}")
         
         # Calibrate with representative data
         print("Calibrating model for PTQ...")
@@ -100,6 +130,51 @@ class QuantizationUtils:
         # Convert to quantized model (with error handling)
         try:
             model_quantized = torch.quantization.convert(model_prepared)
+            
+            # Verify that all layers were properly quantized
+            # Check for any remaining non-quantized Conv2d/Linear layers (except if they're wrapped)
+            def check_quantization_status(module, path=""):
+                """Recursively check if modules are properly quantized"""
+                issues = []
+                for name, child in module.named_children():
+                    full_path = f"{path}.{name}" if path else name
+                    # Check if this is a Conv2d or Linear that should be quantized
+                    if isinstance(child, (torch.nn.Conv2d, torch.nn.Linear)):
+                        # If it's not a quantized version, that's a problem
+                        if not isinstance(child, (torch.nn.quantized.modules.conv.Conv2d, 
+                                                torch.nn.quantized.modules.linear.Linear)):
+                            # But it might be wrapped in a fused module, so check parent
+                            if not hasattr(module, '_modules') or name not in module._modules:
+                                issues.append(f"{full_path}: {type(child).__name__} not quantized")
+                    # Recursively check children
+                    issues.extend(check_quantization_status(child, full_path))
+                return issues
+            
+            quantization_issues = check_quantization_status(model_quantized)
+            if quantization_issues:
+                print("⚠️  Warning: Some layers may not be fully quantized:")
+                for issue in quantization_issues[:5]:  # Show first 5 issues
+                    print(f"   - {issue}")
+                if len(quantization_issues) > 5:
+                    print(f"   ... and {len(quantization_issues) - 5} more")
+            
+            # Specifically check for rgb_conv if it exists (for grayscale models)
+            if hasattr(model_quantized, 'rgb_conv') and model_quantized.rgb_conv is not None:
+                rgb_conv = model_quantized.rgb_conv
+                if isinstance(rgb_conv, torch.nn.Conv2d):
+                    print("⚠️  ERROR: rgb_conv is still a regular Conv2d, not quantized!")
+                    print("   This will cause errors during inference.")
+                    print("   Attempting workaround by ensuring it's properly quantized...")
+                    # This shouldn't happen if qconfig was set correctly, but if it does,
+                    # we need to handle it differently or raise an error
+                    raise RuntimeError(
+                        "rgb_conv layer was not properly quantized. "
+                        "This may be due to model structure issues. "
+                        "Please ensure all layers have qconfig set before quantization."
+                    )
+                else:
+                    print(f"  ✅ rgb_conv is properly quantized: {type(rgb_conv).__name__}")
+            
             print("PTQ completed!")
             return model_quantized
         except RuntimeError as e:
