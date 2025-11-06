@@ -168,6 +168,54 @@ class QuantizationUtils:
         try:
             model_quantized = torch.quantization.convert(model_prepared)
             
+            # CRITICAL FIX: Manually convert rgb_conv if it wasn't converted automatically
+            # This is necessary because rgb_conv is a direct child between QuantStub and base_model
+            # and PyTorch's convert() might not handle it correctly
+            if hasattr(model_quantized, 'rgb_conv') and model_quantized.rgb_conv is not None:
+                rgb_conv_prepared = None
+                # Find rgb_conv in the prepared model
+                if hasattr(model_prepared, 'rgb_conv') and model_prepared.rgb_conv is not None:
+                    rgb_conv_prepared = model_prepared.rgb_conv
+                
+                # Check if rgb_conv was converted
+                rgb_conv_module = type(model_quantized.rgb_conv).__module__
+                if 'quantized' not in rgb_conv_module.lower() and not hasattr(model_quantized.rgb_conv, '_packed_params'):
+                    print("  ⚠️  rgb_conv was not automatically converted, attempting manual conversion...")
+                    
+                    if rgb_conv_prepared is not None:
+                        try:
+                            # Try to convert rgb_conv by wrapping it in a Sequential and converting
+                            # This preserves the observers that were added during prepare()
+                            prepared_conv = rgb_conv_prepared
+                            
+                            # Create a simple wrapper module that just contains rgb_conv
+                            class ConvWrapper(torch.nn.Module):
+                                def __init__(self, conv):
+                                    super().__init__()
+                                    self.conv = conv
+                                def forward(self, x):
+                                    return self.conv(x)
+                            
+                            wrapper = ConvWrapper(prepared_conv)
+                            wrapper.eval()
+                            
+                            # Convert the wrapper
+                            wrapper_quantized = torch.quantization.convert(wrapper)
+                            
+                            # Extract the quantized conv
+                            if hasattr(wrapper_quantized, 'conv'):
+                                model_quantized.rgb_conv = wrapper_quantized.conv
+                                print("  ✓ Manually converted rgb_conv to quantized version")
+                            else:
+                                raise ValueError("Wrapper conversion did not produce expected structure")
+                                
+                        except Exception as e:
+                            print(f"  ❌ Failed to manually convert rgb_conv: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Don't raise here - let the verification catch it
+                            print("  Will verify and raise error if conversion failed.")
+            
             # Verify that all layers were properly quantized
             # Check for any remaining non-quantized Conv2d/Linear layers (except if they're wrapped)
             def check_quantization_status(module, path=""):
@@ -212,29 +260,30 @@ class QuantizationUtils:
             if rgb_conv_paths:
                 for path, rgb_conv in rgb_conv_paths:
                     rgb_conv_type = type(rgb_conv).__name__
-                    print(f"  Found rgb_conv at '{path}': {rgb_conv_type}")
+                    rgb_conv_module = type(rgb_conv).__module__
+                    print(f"  Found rgb_conv at '{path}': {rgb_conv_type} (module: {rgb_conv_module})")
                     
-                    # Check if it's quantized by looking at the type name and module path
-                    # QuantizedConv2d is in torch.nn.quantized.modules.conv
-                    is_quantized = (
-                        'Quantized' in rgb_conv_type or 
-                        'quantized' in rgb_conv_type.lower() or
-                        hasattr(rgb_conv, '_packed_params') or  # Quantized modules have _packed_params
-                        'quantized' in str(type(rgb_conv).__module__).lower()
-                    )
+                    # Check if it's quantized by looking at the module path
+                    # QuantizedConv2d is in torch.nn.quantized.modules.conv or torch.ao.nn.quantized.modules.conv
+                    is_quantized = 'quantized' in rgb_conv_module.lower()
+                    
+                    # Also check for _packed_params which quantized modules have
+                    if hasattr(rgb_conv, '_packed_params'):
+                        is_quantized = True
                     
                     # Check if it's a regular Conv2d (not quantized)
+                    # Regular Conv2d is in torch.nn.modules.conv
                     is_regular_conv2d = (
-                        isinstance(rgb_conv, torch.nn.Conv2d) and 
-                        not is_quantized and
-                        'quantized' not in str(type(rgb_conv).__module__).lower()
+                        rgb_conv_module == 'torch.nn.modules.conv' or
+                        (isinstance(rgb_conv, torch.nn.Conv2d) and not is_quantized)
                     )
                     
                     if is_regular_conv2d:
-                        print(f"  ⚠️  ERROR: rgb_conv at '{path}' is still a regular Conv2d!")
+                        print(f"  ❌ ERROR: rgb_conv at '{path}' is still a regular Conv2d!")
                         print(f"     Type: {rgb_conv_type}")
-                        print(f"     Module: {type(rgb_conv).__module__}")
+                        print(f"     Module: {rgb_conv_module}")
                         print(f"     This will cause errors during inference.")
+                        print(f"     The convert() step did not quantize this layer.")
                         
                         # Try to get more info about why it wasn't quantized
                         if hasattr(rgb_conv, 'qconfig'):
@@ -242,16 +291,22 @@ class QuantizationUtils:
                         else:
                             print(f"     No qconfig attribute found!")
                         
+                        # This is a critical error - the model cannot be used
                         raise RuntimeError(
-                            f"rgb_conv layer at '{path}' was not properly quantized (type: {rgb_conv_type}). "
+                            f"rgb_conv layer at '{path}' was NOT quantized (type: {rgb_conv_type}, module: {rgb_conv_module}). "
                             "This is a critical error that will prevent inference. "
-                            "The layer sits between QuantStub and base_model and requires special handling. "
-                            "Please check that qconfig was properly set for this layer before quantization."
+                            "The convert() operation did not quantize this layer, likely because it's a direct child "
+                            "that sits between QuantStub and base_model. This requires special handling."
                         )
                     elif is_quantized:
-                        print(f"  ✅ rgb_conv at '{path}' is properly quantized: {rgb_conv_type}")
+                        print(f"  ✅ rgb_conv at '{path}' is properly quantized: {rgb_conv_type} (module: {rgb_conv_module})")
                     else:
-                        print(f"  ⚠️  rgb_conv at '{path}' has unexpected type: {rgb_conv_type} (module: {type(rgb_conv).__module__})")
+                        print(f"  ⚠️  rgb_conv at '{path}' has unexpected type: {rgb_conv_type} (module: {rgb_conv_module})")
+                        # Treat unexpected types as errors for safety
+                        raise RuntimeError(
+                            f"rgb_conv at '{path}' has unexpected type {rgb_conv_type} (module: {rgb_conv_module}). "
+                            "Cannot determine if it's properly quantized."
+                        )
             
             print("PTQ completed!")
             return model_quantized
