@@ -81,15 +81,20 @@ class QuantizationUtils:
         model.eval()
         model.to(device)
         
+        # Set quantized backend to qnnpack
+        # This must be set before creating qconfig to ensure compatibility
+        try:
+            torch.backends.quantized.engine = 'qnnpack'
+        except AttributeError:
+            print("qnnpack not available")
+            exit()
         # Set quantization config for PTQ
         # Use 'qnnpack' for ARM CPUs (like Apple Silicon), 'fbgemm' for x86 CPUs
         # Default to 'qnnpack' as it's more commonly used and works well on ARM
         backend = 'qnnpack'  # Change to 'fbgemm' for x86 CPUs if needed
-        qconfig = torch.quantization.get_default_qconfig(backend)
         
-        # Set qconfig on the model and all submodules
-        # This ensures custom layers like rgb_conv are also quantized
-        model.qconfig = qconfig
+        # Set qconfig on the model
+        model.qconfig = torch.quantization.get_default_qconfig(backend)
         # Explicitly set qconfig on all submodules to ensure they're quantized
         for module in model.modules():
             if hasattr(module, 'qconfig') and module.qconfig is None:
