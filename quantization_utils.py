@@ -85,7 +85,18 @@ class QuantizationUtils:
         # Use 'qnnpack' for ARM CPUs (like Apple Silicon), 'fbgemm' for x86 CPUs
         # Default to 'qnnpack' as it's more commonly used and works well on ARM
         backend = 'qnnpack'  # Change to 'fbgemm' for x86 CPUs if needed
-        model.qconfig = torch.quantization.get_default_qconfig(backend)
+        qconfig = torch.quantization.get_default_qconfig(backend)
+        
+        # Set qconfig on the model and all submodules
+        # This ensures custom layers like rgb_conv are also quantized
+        model.qconfig = qconfig
+        # Explicitly set qconfig on all submodules to ensure they're quantized
+        for module in model.modules():
+            if hasattr(module, 'qconfig') and module.qconfig is None:
+                # Only set qconfig on modules that don't have it set
+                # Skip QuantStub and DeQuantStub as they're handled separately
+                if not isinstance(module, (torch.quantization.QuantStub, torch.quantization.DeQuantStub)):
+                    module.qconfig = qconfig
         
         # Prepare model for quantization (inplace operation)
         print("Preparing model for quantization...")

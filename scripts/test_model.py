@@ -223,7 +223,12 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             quantized_path = model_file
         else:
             # Directory provided - look for quantized model
-            quantized_path = os.path.join(model_dir, f'{model_type}_quantized_complete.pth')
+            # Try both naming patterns: with and without "_model" prefix
+            quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized_complete.pth')
+            if not os.path.exists(quantized_path):
+                quantized_path = os.path.join(model_dir, f'{model_type}_quantized_complete.pth')
+            if not os.path.exists(quantized_path):
+                quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized.pth')
             if not os.path.exists(quantized_path):
                 quantized_path = os.path.join(model_dir, f'{model_type}_quantized.pth')
         
@@ -259,7 +264,57 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             # Try loading with weights_only=False for complete models
             # Note: Quantized models must stay on CPU and cannot be moved with .to()
             # Using map_location=device ensures data is on the correct device during loading
-            model = torch.load(quantized_path, map_location=device, weights_only=False)
+            loaded_obj = torch.load(quantized_path, map_location=device, weights_only=False)
+            
+            # Check if we loaded a model or a state_dict (OrderedDict)
+            if isinstance(loaded_obj, nn.Module):
+                # We successfully loaded a complete model
+                model = loaded_obj
+            elif isinstance(loaded_obj, dict):
+                # We loaded a state_dict instead of a complete model
+                print("  ⚠️  Loaded state_dict instead of complete model. Looking for complete model file...")
+                
+                # For quantized models, we cannot easily reconstruct from state_dict
+                # because the quantized model structure is different from the original
+                # Try to find the complete model file (check multiple naming patterns)
+                possible_complete_paths = [
+                    quantized_path.replace('.pth', '_complete.pth'),
+                    quantized_path.replace('_quantized.pth', '_quantized_complete.pth'),
+                    quantized_path.replace('_model_quantized.pth', '_model_quantized_complete.pth'),
+                    os.path.join(os.path.dirname(quantized_path), f'{model_type}_model_quantized_complete.pth'),
+                    os.path.join(os.path.dirname(quantized_path), f'{model_type}_quantized_complete.pth'),
+                ]
+                
+                complete_path = None
+                for path in possible_complete_paths:
+                    if os.path.exists(path):
+                        complete_path = path
+                        break
+                
+                if complete_path:
+                    print(f"  Found complete model file: {complete_path}")
+                    loaded_obj = torch.load(complete_path, map_location=device, weights_only=False)
+                    if isinstance(loaded_obj, nn.Module):
+                        model = loaded_obj
+                    else:
+                        raise RuntimeError(
+                            f"Complete model file {complete_path} does not contain a valid model. "
+                            f"Got type: {type(loaded_obj)}"
+                        )
+                else:
+                    raise RuntimeError(
+                        f"Quantized model file {quantized_path} contains only state_dict.\n"
+                        f"Quantized models cannot be reconstructed from state_dict alone.\n"
+                        f"Please ensure the PTQ script saves the complete model (look for *_complete.pth file).\n"
+                        f"Tried to find complete model in: {os.path.dirname(quantized_path)}"
+                    )
+            else:
+                # Unknown type
+                raise RuntimeError(
+                    f"Unexpected object type loaded from {quantized_path}. "
+                    f"Expected a PyTorch model (nn.Module) or state_dict (dict), got: {type(loaded_obj)}"
+                )
+            
             # Do NOT call .to(device) on quantized models - they must remain on CPU
             # The model is already on CPU since device is forced to CPU for PTQ models
             
@@ -354,15 +409,12 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     
     print(f"\nEvaluating {model_type} {test_type} model...")
     
-    # Use inference_mode for quantized models to avoid hook-related issues
-    # inference_mode is more restrictive than no_grad but works better with quantized models
-    # Fallback to no_grad for older PyTorch versions
+    # For quantized models, use no_grad instead of inference_mode
+    # inference_mode can cause issues with quantized models due to hook checking
+    # no_grad is sufficient for inference and works better with quantized modules
     if test_type == "ptq":
-        try:
-            context_manager = torch.inference_mode()
-        except AttributeError:
-            # inference_mode not available in older PyTorch versions
-            context_manager = torch.no_grad()
+        # Use no_grad for quantized models to avoid hook-related errors
+        context_manager = torch.no_grad()
     else:
         context_manager = torch.no_grad()
     
