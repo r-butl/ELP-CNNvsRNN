@@ -341,6 +341,12 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         # Quantized models are always in evaluation mode by design
         # Calling .eval() on them causes AttributeError due to their different structure
         print("  Note: Quantized model is already in evaluation mode")
+        
+        # Ensure quantized backend is set for inference as well
+        try:
+            torch.backends.quantized.engine = 'qnnpack'
+        except AttributeError:
+            pass
     
     # Collect predictions and true labels
     predictions = []
@@ -348,12 +354,45 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     
     print(f"\nEvaluating {model_type} {test_type} model...")
     
-    with torch.no_grad():
+    # Use inference_mode for quantized models to avoid hook-related issues
+    # inference_mode is more restrictive than no_grad but works better with quantized models
+    # Fallback to no_grad for older PyTorch versions
+    if test_type == "ptq":
+        try:
+            context_manager = torch.inference_mode()
+        except AttributeError:
+            # inference_mode not available in older PyTorch versions
+            context_manager = torch.no_grad()
+    else:
+        context_manager = torch.no_grad()
+    
+    with context_manager:
         for batch_idx, (inputs, labels) in enumerate(test_loader):
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+            # For quantized models, ensure inputs stay on CPU
+            if test_type == "ptq":
+                # Quantized models must run on CPU - don't move inputs
+                inputs = inputs  # Already on CPU from data loader
+                labels = labels
+            else:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
             
-            outputs = model(inputs).squeeze()
+            try:
+                outputs = model(inputs).squeeze()
+            except AttributeError as e:
+                if "_backward_hooks" in str(e) or "_forward_hooks" in str(e) or "_modules" in str(e):
+                    # This is a known issue with quantized models
+                    # The error suggests the model structure might be incompatible
+                    print(f"  ❌ Error: Quantized model inference failed: {e}")
+                    print("  This may indicate the quantized model was saved with an incompatible backend.")
+                    print("  Please re-run PTQ quantization with the updated code.")
+                    raise RuntimeError(
+                        f"Quantized model inference error: {e}\n"
+                        "This error typically occurs when a quantized model was created with cuDNN backend\n"
+                        "or when the model structure is incompatible. Please re-run PTQ quantization."
+                    ) from e
+                else:
+                    raise
             
             # Handle single sample case
             if outputs.dim() == 0:
