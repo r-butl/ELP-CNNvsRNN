@@ -19,6 +19,13 @@ from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
 from quantization_utils import QuantizationUtils
 
+# Set quantized backend early to ensure it's used for all quantization operations
+try:
+    torch.backends.quantized.engine = 'qnnpack'
+except AttributeError:
+    pass
+os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
+
 
 def get_device():
     """Get available device (CPU for quantization)"""
@@ -87,9 +94,16 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     
     original_model.load_state_dict(torch.load(weights_path, map_location=device))
     original_model = original_model.to(device)
+    # Set to eval mode - this is important for quantization
+    # Note: The quantization_utils will also call eval(), but it's good to set it here too
     original_model.eval()
     
     print(f"Loaded weights from: {weights_path}")
+    
+    # Verify model structure before quantization
+    if hasattr(original_model, 'rgb_conv') and original_model.rgb_conv is not None:
+        print(f"  Model has rgb_conv layer: {type(original_model.rgb_conv).__name__}")
+        print(f"  rgb_conv will need to be quantized along with other layers")
     
     # Create calibration loader
     print("\nCreating calibration data loader...")
@@ -108,6 +122,17 @@ def apply_ptq_to_model(model_type, model_path, config_path):
         calibration_loader,
         device=device
     )
+    
+    # Verify quantization was successful
+    print("\nVerifying quantization...")
+    if hasattr(quantized_model, 'rgb_conv') and quantized_model.rgb_conv is not None:
+        rgb_conv_type = type(quantized_model.rgb_conv).__name__
+        print(f"  rgb_conv type after quantization: {rgb_conv_type}")
+        if 'Quantized' not in rgb_conv_type and 'quantized' not in rgb_conv_type.lower():
+            print("  ⚠️  WARNING: rgb_conv does not appear to be quantized!")
+            print("     This may cause errors during inference.")
+        else:
+            print("  ✅ rgb_conv is properly quantized")
     
     # Save quantized model
     quantized_model_path = os.path.join(ptq_folder, f'{model_type}_quantized.pth')

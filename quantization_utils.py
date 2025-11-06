@@ -89,24 +89,56 @@ class QuantizationUtils:
         # IMPORTANT: Explicitly set qconfig for all modules, especially rgb_conv
         # This ensures that all layers (including rgb_conv) are properly quantized
         # We need to set qconfig for all quantizable operations, not just the top-level model
+        
+        # First, set qconfig for direct children (like rgb_conv) before traversing nested modules
+        # This is critical because direct children might be missed by automatic propagation
+        direct_children_set = []
+        for name, child in model.named_children():
+            if isinstance(child, torch.nn.Conv2d):
+                if not hasattr(child, 'qconfig') or child.qconfig is None:
+                    child.qconfig = qconfig
+                    direct_children_set.append(name)
+                    print(f"  ✓ Set qconfig for direct child: {name}")
+        
+        # Then set qconfig for all nested modules
+        modules_set = []
         for name, module in model.named_modules():
             # Skip QuantStub and DeQuantStub - they have their own handling
             if isinstance(module, (torch.quantization.QuantStub, torch.quantization.DeQuantStub)):
                 continue
             # Set qconfig for all Conv2d, Linear, and activation layers
             if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear, torch.nn.ReLU, 
-                                 torch.nn.LeakyReLU, torch.nn.Sigmoid, torch.nn.Dropout)):
-                # Only set if not already set (QuantStub might have set it)
+                                 torch.nn.LeakyReLU, torch.nn.Sigmoid)):
+                # Only set if not already set
                 if not hasattr(module, 'qconfig') or module.qconfig is None:
                     module.qconfig = qconfig
+                    # Only print for important modules to avoid too much output
+                    if 'rgb_conv' in name or name.count('.') <= 1:  # Top-level or first-level modules
+                        modules_set.append(name)
         
-        # Also explicitly set qconfig for direct children that might be missed
-        # This is especially important for rgb_conv which is a direct child
-        for name, child in model.named_children():
-            if isinstance(child, torch.nn.Conv2d):
-                if not hasattr(child, 'qconfig') or child.qconfig is None:
-                    child.qconfig = qconfig
-                    print(f"  Set qconfig for direct child: {name}")
+        if modules_set:
+            print(f"  ✓ Set qconfig for {len(modules_set)} additional modules")
+            if 'rgb_conv' in str(modules_set):
+                print("  ✓ rgb_conv qconfig confirmed")
+        
+        # Verify qconfig is set before prepare
+        if hasattr(model, 'rgb_conv') and model.rgb_conv is not None:
+            if hasattr(model.rgb_conv, 'qconfig'):
+                print(f"  rgb_conv qconfig BEFORE prepare: {model.rgb_conv.qconfig}")
+            else:
+                print(f"  ⚠️  WARNING: rgb_conv has no qconfig before prepare!")
+                # Try to set it again
+                model.rgb_conv.qconfig = qconfig
+                print(f"  ✓ Manually set rgb_conv qconfig before prepare")
+        
+        # Use propagate_qconfig_ to ensure qconfig propagates correctly
+        # This is important for layers that might not get qconfig automatically
+        try:
+            torch.quantization.propagate_qconfig_(model, qconfig_dict=None)
+            print("  ✓ Propagated qconfig to all modules")
+        except AttributeError:
+            # propagate_qconfig_ might not be available in all PyTorch versions
+            print("  ⚠️  propagate_qconfig_ not available, using default propagation")
         
         # Prepare model for quantization
         model_prepared = torch.quantization.prepare(model)
@@ -114,9 +146,14 @@ class QuantizationUtils:
         # Verify that rgb_conv was prepared (if it exists)
         if hasattr(model_prepared, 'rgb_conv') and model_prepared.rgb_conv is not None:
             rgb_conv_prepared = model_prepared.rgb_conv
-            print(f"  rgb_conv after prepare: {type(rgb_conv_prepared).__name__}")
+            print(f"  rgb_conv after prepare: {type(rgb_conv_prepared).__name__} (module: {type(rgb_conv_prepared).__module__})")
             if hasattr(rgb_conv_prepared, 'qconfig'):
-                print(f"  rgb_conv qconfig: {rgb_conv_prepared.qconfig}")
+                print(f"  rgb_conv qconfig after prepare: {rgb_conv_prepared.qconfig}")
+            # Check if it's an observer wrapper (which is what prepare should create)
+            if hasattr(rgb_conv_prepared, 'activation_post_process'):
+                print(f"  ✓ rgb_conv has activation_post_process (properly prepared)")
+            else:
+                print(f"  ⚠️  WARNING: rgb_conv does not have activation_post_process after prepare!")
         
         # Calibrate with representative data
         print("Calibrating model for PTQ...")
@@ -159,21 +196,62 @@ class QuantizationUtils:
                     print(f"   ... and {len(quantization_issues) - 5} more")
             
             # Specifically check for rgb_conv if it exists (for grayscale models)
-            if hasattr(model_quantized, 'rgb_conv') and model_quantized.rgb_conv is not None:
-                rgb_conv = model_quantized.rgb_conv
-                if isinstance(rgb_conv, torch.nn.Conv2d):
-                    print("⚠️  ERROR: rgb_conv is still a regular Conv2d, not quantized!")
-                    print("   This will cause errors during inference.")
-                    print("   Attempting workaround by ensuring it's properly quantized...")
-                    # This shouldn't happen if qconfig was set correctly, but if it does,
-                    # we need to handle it differently or raise an error
-                    raise RuntimeError(
-                        "rgb_conv layer was not properly quantized. "
-                        "This may be due to model structure issues. "
-                        "Please ensure all layers have qconfig set before quantization."
+            # This is critical because rgb_conv sits between QuantStub and base_model
+            # and might not get quantized automatically
+            rgb_conv_paths = []
+            def find_rgb_conv(module, path=""):
+                """Recursively find rgb_conv in the model"""
+                if hasattr(module, 'rgb_conv') and module.rgb_conv is not None:
+                    rgb_conv_paths.append((path, module.rgb_conv))
+                for name, child in module.named_children():
+                    child_path = f"{path}.{name}" if path else name
+                    find_rgb_conv(child, child_path)
+            
+            find_rgb_conv(model_quantized)
+            
+            if rgb_conv_paths:
+                for path, rgb_conv in rgb_conv_paths:
+                    rgb_conv_type = type(rgb_conv).__name__
+                    print(f"  Found rgb_conv at '{path}': {rgb_conv_type}")
+                    
+                    # Check if it's quantized by looking at the type name and module path
+                    # QuantizedConv2d is in torch.nn.quantized.modules.conv
+                    is_quantized = (
+                        'Quantized' in rgb_conv_type or 
+                        'quantized' in rgb_conv_type.lower() or
+                        hasattr(rgb_conv, '_packed_params') or  # Quantized modules have _packed_params
+                        'quantized' in str(type(rgb_conv).__module__).lower()
                     )
-                else:
-                    print(f"  ✅ rgb_conv is properly quantized: {type(rgb_conv).__name__}")
+                    
+                    # Check if it's a regular Conv2d (not quantized)
+                    is_regular_conv2d = (
+                        isinstance(rgb_conv, torch.nn.Conv2d) and 
+                        not is_quantized and
+                        'quantized' not in str(type(rgb_conv).__module__).lower()
+                    )
+                    
+                    if is_regular_conv2d:
+                        print(f"  ⚠️  ERROR: rgb_conv at '{path}' is still a regular Conv2d!")
+                        print(f"     Type: {rgb_conv_type}")
+                        print(f"     Module: {type(rgb_conv).__module__}")
+                        print(f"     This will cause errors during inference.")
+                        
+                        # Try to get more info about why it wasn't quantized
+                        if hasattr(rgb_conv, 'qconfig'):
+                            print(f"     qconfig: {rgb_conv.qconfig}")
+                        else:
+                            print(f"     No qconfig attribute found!")
+                        
+                        raise RuntimeError(
+                            f"rgb_conv layer at '{path}' was not properly quantized (type: {rgb_conv_type}). "
+                            "This is a critical error that will prevent inference. "
+                            "The layer sits between QuantStub and base_model and requires special handling. "
+                            "Please check that qconfig was properly set for this layer before quantization."
+                        )
+                    elif is_quantized:
+                        print(f"  ✅ rgb_conv at '{path}' is properly quantized: {rgb_conv_type}")
+                    else:
+                        print(f"  ⚠️  rgb_conv at '{path}' has unexpected type: {rgb_conv_type} (module: {type(rgb_conv).__module__})")
             
             print("PTQ completed!")
             return model_quantized
