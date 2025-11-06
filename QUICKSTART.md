@@ -65,18 +65,21 @@ python scripts/cross_validation.py --model mobilenetv2
 python scripts/train_regular.py --model mobilenetv2 --best_config <path> --config config.yaml
 
 # 3. Train with Quantization-Aware Training
-python scripts/train_qat.py --model mobilenetv2
+python scripts/train_qat.py --model mobilenetv2 --
 
 # 4. Apply Post-Training Quantization
 python scripts/apply_ptq.py \
     --model mobilenetv2 \
     --model_path training_run_mobilenetv2_regular_YYYYMMDD_HHMMSS
 
+python scripts/apply_ptq.py --model mobilenetv2 --model_path model_mobilenetv2_regular/ --config config.yaml
+
 # 5. Evaluate models
 python scripts/test_model.py \
     --model mobilenetv2 \
     --model_path training_run_mobilenetv2_regular_YYYYMMDD_HHMMSS \
     --test_type regular
+    --config config.yaml
 ```
 
 ## Understanding the Output

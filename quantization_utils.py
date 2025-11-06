@@ -70,6 +70,18 @@ class QuantizationUtils:
         model.eval()
         model.to(device)
         
+        # Explicitly set quantized backend to qnnpack to avoid cuDNN grouped conv issues
+        # cuDNN quantized operations don't support grouped convolutions (groups > 1)
+        # which MobileNetV2 uses for depthwise separable convolutions
+        try:
+            torch.backends.quantized.engine = 'qnnpack'
+        except AttributeError:
+            # Older PyTorch versions might not have this attribute
+            pass
+        
+        # Also set environment variable as a fallback
+        os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
+        
         # Set quantization config
         model.qconfig = torch.quantization.get_default_qconfig('qnnpack')
         

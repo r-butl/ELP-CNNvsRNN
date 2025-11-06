@@ -32,8 +32,12 @@ from models.mobilenetv2_model import MobileNetV2Model, QuantizedMobileNetV2Model
 from models.resnet18_model import ResNet18Model, QuantizedResNet18Model
 
 
-def get_device():
+def get_device(test_type="regular"):
     """Get available device"""
+    # Quantized models must run on CPU due to CUDA limitations
+    if test_type == "ptq":
+        return torch.device("cpu")
+    
     if torch.backends.mps.is_available():
         return torch.device("mps")
     elif torch.cuda.is_available():
@@ -108,19 +112,17 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     results_folder = f"test_results_{model_type}_{test_type}_{timestamp}"
     os.makedirs(results_folder, exist_ok=True)
     
+    # Get device first (needed for data loader settings)
+    device = get_device(test_type)
+    print(f"Using device: {device}")
+    if test_type == "ptq":
+        print("  Note: Quantized models must run on CPU due to CUDA limitations")
+    
     # Load test dataset
     print("\nLoading test dataset...")
     test_dataset = read_tfrecords(
         os.path.join(cfg['data']['dataset_folder'], cfg['data']['test_file']), 
         buffer_size=64000
-    )
-    
-    test_loader = create_dataloader(
-        test_dataset,
-        batch_size=32,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True
     )
     
     # Get input shape from first sample
@@ -130,9 +132,15 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     print(f"Test dataset size: {len(test_dataset)}")
     print(f"Input shape (HWC format): {input_shape}")
     
-    # Get device
-    device = get_device()
-    print(f"Using device: {device}")
+    # Create data loader with appropriate settings based on device
+    use_pin_memory = device.type == 'cuda'
+    test_loader = create_dataloader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=use_pin_memory
+    )
     
     # Load model based on test type
     print(f"\nLoading {test_type} model...")
@@ -223,12 +231,72 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             raise FileNotFoundError(f"Quantized model not found: {quantized_path}")
         
         print(f"Loading quantized model from: {quantized_path}")
+        
+        # Set quantized backend to qnnpack to avoid cuDNN grouped convolution issues
+        # cuDNN quantized operations don't support grouped convolutions (groups > 1)
+        # which MobileNetV2 uses for depthwise separable convolutions
+        original_quantized_engine = None
+        original_quantized_engine_env = None
+        
+        # Try to set backend via PyTorch API
+        try:
+            original_quantized_engine = torch.backends.quantized.engine
+            torch.backends.quantized.engine = 'qnnpack'
+            print("  Using quantized backend: qnnpack (to avoid cuDNN grouped conv limitations)")
+        except AttributeError:
+            # Older PyTorch versions might not have this attribute
+            pass
+        
+        # Also try setting via environment variable as a fallback
+        if 'PYTORCH_QUANTIZED_ENGINE' not in os.environ:
+            os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
+            original_quantized_engine_env = 'qnnpack'  # Mark that we set it
+        else:
+            original_quantized_engine_env = os.environ.get('PYTORCH_QUANTIZED_ENGINE')
+            os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
+        
         try:
             # Try loading with weights_only=False for complete models
             model = torch.load(quantized_path, map_location=device, weights_only=False)
             model = model.to(device)
+            
+            # Restore original backend after successful load
+            if original_quantized_engine is not None:
+                try:
+                    torch.backends.quantized.engine = original_quantized_engine
+                except:
+                    pass
         except Exception as e:
-            if "weights_only" in str(e) or "Unsupported global" in str(e):
+            # Restore original backend before handling errors
+            if original_quantized_engine is not None:
+                try:
+                    torch.backends.quantized.engine = original_quantized_engine
+                except:
+                    pass
+            if original_quantized_engine_env is not None:
+                if original_quantized_engine_env == 'qnnpack':
+                    # We set it, so remove it
+                    os.environ.pop('PYTORCH_QUANTIZED_ENGINE', None)
+                else:
+                    # Restore original value
+                    os.environ['PYTORCH_QUANTIZED_ENGINE'] = original_quantized_engine_env
+            
+            # Check if this is the grouped convolution error
+            if "groups" in str(e) and "cudnn" in str(e).lower():
+                print(f"  ⚠️  Error: {e}")
+                print("  This error occurs because cuDNN quantized operations don't support grouped convolutions.")
+                print("  The quantized model may have been saved with cuDNN backend.")
+                print("  Attempting workaround: loading with qnnpack backend forced...")
+                
+                # Try to force qnnpack by setting environment variable approach
+                # Re-quantize the model on-the-fly if possible, or provide guidance
+                raise RuntimeError(
+                    f"Unable to load quantized model: {e}\n"
+                    "Solution: The quantized model was likely created with cuDNN backend which doesn't support "
+                    "grouped convolutions used in MobileNetV2. Please re-run PTQ quantization with qnnpack backend, "
+                    "or use the state_dict loading method if available."
+                )
+            elif "weights_only" in str(e) or "Unsupported global" in str(e):
                 print("  ⚠️  Complete model loading failed, trying to load as state_dict...")
                 # Fallback: try to load as state_dict and create model architecture
                 try:
