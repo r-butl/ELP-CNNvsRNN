@@ -223,9 +223,9 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             quantized_path = model_file
         else:
             # Directory provided - look for quantized model
-            quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized_complete.pth')
+            quantized_path = os.path.join(model_dir, f'{model_type}_quantized_complete.pth')
             if not os.path.exists(quantized_path):
-                quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized_final.pth')
+                quantized_path = os.path.join(model_dir, f'{model_type}_quantized.pth')
         
         if not os.path.exists(quantized_path):
             raise FileNotFoundError(f"Quantized model not found: {quantized_path}")
