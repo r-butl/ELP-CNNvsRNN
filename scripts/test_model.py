@@ -334,7 +334,13 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             else:
                 raise e
     
-    model.eval()
+    # Set model to evaluation mode (quantized models are already in eval mode and don't support .eval())
+    if test_type != "ptq":
+        model.eval()
+    else:
+        # Quantized models are always in evaluation mode by design
+        # Calling .eval() on them causes AttributeError due to their different structure
+        print("  Note: Quantized model is already in evaluation mode")
     
     # Collect predictions and true labels
     predictions = []
