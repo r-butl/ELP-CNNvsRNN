@@ -257,8 +257,11 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         
         try:
             # Try loading with weights_only=False for complete models
+            # Note: Quantized models must stay on CPU and cannot be moved with .to()
+            # Using map_location=device ensures data is on the correct device during loading
             model = torch.load(quantized_path, map_location=device, weights_only=False)
-            model = model.to(device)
+            # Do NOT call .to(device) on quantized models - they must remain on CPU
+            # The model is already on CPU since device is forced to CPU for PTQ models
             
             # Restore original backend after successful load
             if original_quantized_engine is not None:
@@ -319,7 +322,11 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
                     
                     # Load the state dict
                     model.load_state_dict(state_dict)
-                    model = model.to(device)
+                    # Note: For quantized models, we cannot call .to(device)
+                    # The model should already be on CPU since device is forced to CPU for PTQ
+                    # Only call .to(device) if not a quantized model (though this shouldn't happen in PTQ path)
+                    if test_type != "ptq":
+                        model = model.to(device)
                     print("  ✅ Successfully loaded as state_dict")
                 except Exception as e2:
                     print(f"  ❌ Failed to load as state_dict: {e2}")
