@@ -85,23 +85,30 @@ class QuantizationUtils:
         # This must be set before creating qconfig to ensure compatibility
         try:
             torch.backends.quantized.engine = 'qnnpack'
+            print(f"✓ Set quantization backend to: qnnpack")
         except AttributeError:
-            print("qnnpack not available")
+            print("❌ qnnpack not available")
             exit()
+        
         # Set quantization config for PTQ
         # Use 'qnnpack' for ARM CPUs (like Apple Silicon), 'fbgemm' for x86 CPUs
-        # Default to 'qnnpack' as it's more commonly used and works well on ARM
         backend = 'qnnpack'  # Change to 'fbgemm' for x86 CPUs if needed
         
+        # Get the qconfig BEFORE setting it on modules
+        qconfig = torch.quantization.get_default_qconfig(backend)
+        
         # Set qconfig on the model
-        model.qconfig = torch.quantization.get_default_qconfig(backend)
+        model.qconfig = qconfig
+        
         # Explicitly set qconfig on all submodules to ensure they're quantized
         for module in model.modules():
-            if hasattr(module, 'qconfig') and module.qconfig is None:
-                # Only set qconfig on modules that don't have it set
-                # Skip QuantStub and DeQuantStub as they're handled separately
-                if not isinstance(module, (torch.quantization.QuantStub, torch.quantization.DeQuantStub)):
-                    module.qconfig = qconfig
+            # Skip QuantStub and DeQuantStub as they handle quantization boundaries
+            if isinstance(module, (torch.quantization.QuantStub, torch.quantization.DeQuantStub)):
+                continue
+                
+            # Set qconfig on modules that don't have it or have it set to None
+            if not hasattr(module, 'qconfig') or module.qconfig is None:
+                module.qconfig = qconfig
         
         # Prepare model for quantization (inplace operation)
         print("Preparing model for quantization...")
