@@ -42,10 +42,10 @@ training:
 
 # Data paths
 data:
-  dataset_folder: "data/spectrogram_cherrypicked"
+  dataset_folder: "data/"
   train_file: "train.tfrecord"
   validate_file: "validate.tfrecord"
-  test_file: "toughset_test.tfrecord"
+  test_file: "test.tfrecord"
 
 # Output paths
 output:

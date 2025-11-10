@@ -86,7 +86,7 @@ def get_dataset_length(dataset):
     return len(dataset)
 
 
-def create_dataloader(dataset, batch_size, shuffle=False, num_workers=0, pin_memory=False):
+def create_dataloader(dataset, batch_size, shuffle=False, num_workers=0, pin_memory=False, drop_last=False):
     """
     Create PyTorch DataLoader from dataset
     
@@ -105,5 +105,6 @@ def create_dataloader(dataset, batch_size, shuffle=False, num_workers=0, pin_mem
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        drop_last=drop_last
     )

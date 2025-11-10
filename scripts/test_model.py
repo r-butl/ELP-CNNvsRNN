@@ -10,6 +10,8 @@ import yaml
 import json
 import torch
 import torch.nn as nn
+import torch.quantization
+from torchao.quantization.pt2e import allow_exported_model_train_eval
 import numpy as np
 import argparse
 import csv
@@ -30,6 +32,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import read_tfrecords, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model, QuantizedMobileNetV2Model
 from models.resnet18_model import ResNet18Model, QuantizedResNet18Model
+from quantization_utils import QuantizationUtils
 
 
 def get_device(test_type="regular"):
@@ -136,10 +139,11 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     use_pin_memory = device.type == 'cuda'
     test_loader = create_dataloader(
         test_dataset,
-        batch_size=32,
+        batch_size=16,
         shuffle=False,
         num_workers=0,
-        pin_memory=use_pin_memory
+        pin_memory=use_pin_memory,
+        drop_last=True
     )
     
     # Load model based on test type
@@ -216,192 +220,34 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         
         model = model.to(device)
         
+        ptq_eval_safe = True
     elif test_type == "ptq":
-        # Load fully quantized model
+        # Load torchao PTQ model (GraphModule)
+        complete_candidates = []
         if 'model_file' in locals():
-            # Direct model file provided
             quantized_path = model_file
         else:
-            # Directory provided - look for quantized model
-            # Try both naming patterns: with and without "_model" prefix
-            quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized_complete.pth')
-            if not os.path.exists(quantized_path):
-                quantized_path = os.path.join(model_dir, f'{model_type}_quantized_complete.pth')
-            if not os.path.exists(quantized_path):
-                quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized.pth')
-            if not os.path.exists(quantized_path):
-                quantized_path = os.path.join(model_dir, f'{model_type}_quantized.pth')
+            complete_candidates = [
+                os.path.join(model_dir, f'{model_type}_model_quantized_complete.pt2'),
+                os.path.join(model_dir, f'{model_type}_quantized_complete.pt2'),
+            ]
+            quantized_path = next((p for p in complete_candidates if os.path.exists(p)), None)
         
-        if not os.path.exists(quantized_path):
-            raise FileNotFoundError(f"Quantized model not found: {quantized_path}")
+        if quantized_path is None:
+            raise FileNotFoundError(
+                "Quantized model file not found. Expected one of the following files:\n"
+                + "\n".join(complete_candidates)
+            )
         
-        print(f"Loading quantized model from: {quantized_path}")
-        
-        # Set quantized backend to qnnpack to avoid cuDNN grouped convolution issues
-        # cuDNN quantized operations don't support grouped convolutions (groups > 1)
-        # which MobileNetV2 uses for depthwise separable convolutions
-        original_quantized_engine = None
-        original_quantized_engine_env = None
-        
-        # Try to set backend via PyTorch API
-        try:
-            original_quantized_engine = torch.backends.quantized.engine
-            torch.backends.quantized.engine = 'qnnpack'
-            print("  Using quantized backend: qnnpack (to avoid cuDNN grouped conv limitations)")
-        except AttributeError:
-            # Older PyTorch versions might not have this attribute
-            pass
-        
-        # Also try setting via environment variable as a fallback
-        if 'PYTORCH_QUANTIZED_ENGINE' not in os.environ:
-            os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
-            original_quantized_engine_env = 'qnnpack'  # Mark that we set it
-        else:
-            original_quantized_engine_env = os.environ.get('PYTORCH_QUANTIZED_ENGINE')
-            os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
-        
-        try:
-            # Try loading with weights_only=False for complete models
-            # Note: Quantized models must stay on CPU and cannot be moved with .to()
-            # Using map_location=device ensures data is on the correct device during loading
-            loaded_obj = torch.load(quantized_path, map_location=device, weights_only=False)
-            
-            # Check if we loaded a model or a state_dict (OrderedDict)
-            if isinstance(loaded_obj, nn.Module):
-                # We successfully loaded a complete model
-                model = loaded_obj
-            elif isinstance(loaded_obj, dict):
-                # We loaded a state_dict instead of a complete model
-                print("  ⚠️  Loaded state_dict instead of complete model. Looking for complete model file...")
-                
-                # For quantized models, we cannot easily reconstruct from state_dict
-                # because the quantized model structure is different from the original
-                # Try to find the complete model file (check multiple naming patterns)
-                possible_complete_paths = [
-                    quantized_path.replace('.pth', '_complete.pth'),
-                    quantized_path.replace('_quantized.pth', '_quantized_complete.pth'),
-                    quantized_path.replace('_model_quantized.pth', '_model_quantized_complete.pth'),
-                    os.path.join(os.path.dirname(quantized_path), f'{model_type}_model_quantized_complete.pth'),
-                    os.path.join(os.path.dirname(quantized_path), f'{model_type}_quantized_complete.pth'),
-                ]
-                
-                complete_path = None
-                for path in possible_complete_paths:
-                    if os.path.exists(path):
-                        complete_path = path
-                        break
-                
-                if complete_path:
-                    print(f"  Found complete model file: {complete_path}")
-                    loaded_obj = torch.load(complete_path, map_location=device, weights_only=False)
-                    if isinstance(loaded_obj, nn.Module):
-                        model = loaded_obj
-                    else:
-                        raise RuntimeError(
-                            f"Complete model file {complete_path} does not contain a valid model. "
-                            f"Got type: {type(loaded_obj)}"
-                        )
-                else:
-                    raise RuntimeError(
-                        f"Quantized model file {quantized_path} contains only state_dict.\n"
-                        f"Quantized models cannot be reconstructed from state_dict alone.\n"
-                        f"Please ensure the PTQ script saves the complete model (look for *_complete.pth file).\n"
-                        f"Tried to find complete model in: {os.path.dirname(quantized_path)}"
-                    )
-            else:
-                # Unknown type
-                raise RuntimeError(
-                    f"Unexpected object type loaded from {quantized_path}. "
-                    f"Expected a PyTorch model (nn.Module) or state_dict (dict), got: {type(loaded_obj)}"
-                )
-            
-            # Do NOT call .to(device) on quantized models - they must remain on CPU
-            # The model is already on CPU since device is forced to CPU for PTQ models
-            
-            # Restore original backend after successful load
-            if original_quantized_engine is not None:
-                try:
-                    torch.backends.quantized.engine = original_quantized_engine
-                except:
-                    pass
-        except Exception as e:
-            # Restore original backend before handling errors
-            if original_quantized_engine is not None:
-                try:
-                    torch.backends.quantized.engine = original_quantized_engine
-                except:
-                    pass
-            if original_quantized_engine_env is not None:
-                if original_quantized_engine_env == 'qnnpack':
-                    # We set it, so remove it
-                    os.environ.pop('PYTORCH_QUANTIZED_ENGINE', None)
-                else:
-                    # Restore original value
-                    os.environ['PYTORCH_QUANTIZED_ENGINE'] = original_quantized_engine_env
-            
-            # Check if this is the grouped convolution error
-            if "groups" in str(e) and "cudnn" in str(e).lower():
-                print(f"  ⚠️  Error: {e}")
-                print("  This error occurs because cuDNN quantized operations don't support grouped convolutions.")
-                print("  The quantized model may have been saved with cuDNN backend.")
-                print("  Attempting workaround: loading with qnnpack backend forced...")
-                
-                # Try to force qnnpack by setting environment variable approach
-                # Re-quantize the model on-the-fly if possible, or provide guidance
-                raise RuntimeError(
-                    f"Unable to load quantized model: {e}\n"
-                    "Solution: The quantized model was likely created with cuDNN backend which doesn't support "
-                    "grouped convolutions used in MobileNetV2. Please re-run PTQ quantization with qnnpack backend, "
-                    "or use the state_dict loading method if available."
-                )
-            elif "weights_only" in str(e) or "Unsupported global" in str(e):
-                print("  ⚠️  Complete model loading failed, trying to load as state_dict...")
-                # Fallback: try to load as state_dict and create model architecture
-                try:
-                    # Load the state dict
-                    state_dict = torch.load(quantized_path, map_location=device, weights_only=True)
-                    
-                    # Create model architecture
-                    if model_type == 'mobilenetv2':
-                        model = QuantizedMobileNetV2Model(
-                            model_config=model_config,
-                            training=False,
-                            input_shape=input_shape
-                        )
-                    elif model_type == 'resnet18':
-                        model = QuantizedResNet18Model(
-                            model_config=model_config,
-                            training=False,
-                            input_shape=input_shape
-                        )
-                    
-                    # Load the state dict
-                    model.load_state_dict(state_dict)
-                    # Note: For quantized models, we cannot call .to(device)
-                    # The model should already be on CPU since device is forced to CPU for PTQ
-                    # Only call .to(device) if not a quantized model (though this shouldn't happen in PTQ path)
-                    if test_type != "ptq":
-                        model = model.to(device)
-                    print("  ✅ Successfully loaded as state_dict")
-                except Exception as e2:
-                    print(f"  ❌ Failed to load as state_dict: {e2}")
-                    raise e  # Re-raise original error
-            else:
-                raise e
+        print(f"Loading torchao quantized model from: {quantized_path}")
+        exported_program = torch.export.load(quantized_path)
+        allow_exported_model_train_eval(exported_program)
+        model = exported_program.module()
+        ptq_eval_safe = False
     
-    # Set model to evaluation mode (quantized models are already in eval mode and don't support .eval())
-    if test_type != "ptq":
+    # Ensure evaluation mode for inference
+    if hasattr(model, "eval") and (test_type != "ptq" or ptq_eval_safe):
         model.eval()
-    else:
-        # Quantized models are always in evaluation mode by design
-        # Calling .eval() on them causes AttributeError due to their different structure
-        print("  Note: Quantized model is already in evaluation mode")
-        
-        # Ensure quantized backend is set for inference as well
-        try:
-            torch.backends.quantized.engine = 'qnnpack'
-        except AttributeError:
-            pass
     
     # Collect predictions and true labels
     predictions = []
@@ -422,29 +268,13 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         for batch_idx, (inputs, labels) in enumerate(test_loader):
             # For quantized models, ensure inputs stay on CPU
             if test_type == "ptq":
-                # Quantized models must run on CPU - don't move inputs
-                inputs = inputs  # Already on CPU from data loader
-                labels = labels
+                inputs = inputs.to('cpu')
+                labels = labels.to('cpu')
             else:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
             
-            try:
-                outputs = model(inputs).squeeze()
-            except AttributeError as e:
-                if "_backward_hooks" in str(e) or "_forward_hooks" in str(e) or "_modules" in str(e):
-                    # This is a known issue with quantized models
-                    # The error suggests the model structure might be incompatible
-                    print(f"  ❌ Error: Quantized model inference failed: {e}")
-                    print("  This may indicate the quantized model was saved with an incompatible backend.")
-                    print("  Please re-run PTQ quantization with the updated code.")
-                    raise RuntimeError(
-                        f"Quantized model inference error: {e}\n"
-                        "This error typically occurs when a quantized model was created with cuDNN backend\n"
-                        "or when the model structure is incompatible. Please re-run PTQ quantization."
-                    ) from e
-                else:
-                    raise
+            outputs = model(inputs).squeeze()
             
             # Handle single sample case
             if outputs.dim() == 0:

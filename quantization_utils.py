@@ -7,27 +7,70 @@ import torch
 import torch.quantization
 try:
     from torch.ao.quantization import (
-        get_default_qat_qconfig, 
+        get_default_qat_qconfig,
         get_default_qconfig,
-        prepare_qat, 
+        prepare_qat,
         prepare,
-        convert
+        convert,
     )
 except ImportError:
     from torch.quantization import (
-        get_default_qat_qconfig, 
+        get_default_qat_qconfig,
         get_default_qconfig,
-        prepare_qat, 
+        prepare_qat,
         prepare,
-        convert
+        convert,
     )
 import os
 import numpy as np
+
+import torchao  # noqa: F401
+from torchao.quantization.pt2e.quantize_pt2e import prepare_pt2e, convert_pt2e
+from torchao.quantization.pt2e.quantizer.x86_inductor_quantizer import (
+    X86InductorQuantizer,
+    get_default_x86_inductor_quantization_config,
+)
+from torchao.quantization.pt2e import allow_exported_model_train_eval
+from torchao.quantization.utils import recommended_inductor_config_setter
+
 from utils import read_tfrecords, create_dataloader
 
 
 class QuantizationUtils:
     """Utilities for quantization aware training and post-training quantization"""
+    
+    @staticmethod
+    def select_quantized_backend(preferred=None):
+        """
+        Determine the best available quantized backend.
+        Prioritizes fbgemm on x86 and qnnpack otherwise.
+        """
+        engines = getattr(torch.backends.quantized, "supported_engines", [])
+        if preferred and preferred in engines:
+            return preferred
+        if "fbgemm" in engines:
+            return "fbgemm"
+        if "qnnpack" in engines:
+            return "qnnpack"
+        if engines:
+            return engines[0]
+        raise RuntimeError("No quantized backends are available in this PyTorch build.")
+    
+    @staticmethod
+    def configure_quantized_engine(preferred=None, verbose=True):
+        """
+        Select and activate the quantized backend (both torch backend and env var).
+        Returns the backend name that was set.
+        """
+        backend = QuantizationUtils.select_quantized_backend(preferred=preferred)
+        try:
+            torch.backends.quantized.engine = backend
+        except AttributeError:
+            pass
+        os.environ["PYTORCH_QUANTIZED_ENGINE"] = backend
+        if verbose:
+            print(f"✓ Quantized backend set to: {backend}")
+        return backend
     
     @staticmethod
     def prepare_model_for_qat(model):
@@ -66,71 +109,59 @@ class QuantizationUtils:
         return model_quantized
     
     @staticmethod
-    def apply_ptq_to_model(model, calibration_loader, device='cpu'):
+    def apply_ptq_to_model(model, calibration_loader, example_inputs, device='cpu'):
         """
         Apply Post-Training Quantization to a model using calibration data
         
         Args:
-            model: PyTorch model with QuantStub and DeQuantStub
+            model: PyTorch model
             calibration_loader: DataLoader with calibration data
+            example_inputs: Tensor batch (or tuple of tensors) representing example inputs
             device: Device to run calibration on (default: 'cpu')
         
         Returns:
             Quantized model
         """
-        model.eval()
+        if example_inputs is None:
+            raise ValueError("example_inputs must be provided for torchao PTQ export.")
+        
         model.to(device)
         
-        # Set quantized backend to qnnpack
-        # This must be set before creating qconfig to ensure compatibility
-        try:
-            torch.backends.quantized.engine = 'qnnpack'
-            print(f"✓ Set quantization backend to: qnnpack")
-        except AttributeError:
-            print("❌ qnnpack not available")
-            exit()
+        if isinstance(example_inputs, (list, tuple)):
+            example_args = tuple(inp.to(device) for inp in example_inputs)
+        else:
+            example_args = (example_inputs.to(device),)
         
-        # Set quantization config for PTQ
-        # Use 'qnnpack' for ARM CPUs (like Apple Silicon), 'fbgemm' for x86 CPUs
-        backend = 'qnnpack'  # Change to 'fbgemm' for x86 CPUs if needed
+        # TorchAO recommends configuring inductor flags prior to prepare/convert
+        recommended_inductor_config_setter()
         
-        # Get the qconfig BEFORE setting it on modules
-        qconfig = torch.quantization.get_default_qconfig(backend)
+        print("Exporting model graph for torchao PTQ...")
+        exported = torch.export.export(model, example_args)
+        graph_module = exported.module()
         
-        # Set qconfig on the model
-        model.qconfig = qconfig
+        quant_config = get_default_x86_inductor_quantization_config()
+        quantizer = X86InductorQuantizer().set_global(quant_config)
         
-        # Explicitly set qconfig on all submodules to ensure they're quantized
-        for module in model.modules():
-            # Skip QuantStub and DeQuantStub as they handle quantization boundaries
-            if isinstance(module, (torch.quantization.QuantStub, torch.quantization.DeQuantStub)):
-                continue
-                
-            # Set qconfig on modules that don't have it or have it set to None
-            if not hasattr(module, 'qconfig') or module.qconfig is None:
-                module.qconfig = qconfig
+        print("Preparing model with torchao PT2E workflow...")
+        prepared_module = prepare_pt2e(graph_module, quantizer)
+        allow_exported_model_train_eval(prepared_module)
         
-        # Prepare model for quantization (inplace operation)
-        print("Preparing model for quantization...")
-        torch.quantization.prepare(model, inplace=True)
-        
-        # Run calibration data through the model
-        print("Running calibration data through model...")
-        model.eval()
+        print("Running calibration data through prepared model...")
         with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(calibration_loader):
-                inputs = inputs.to(device)
-                _ = model(inputs)
-                
+            prepared_module(*example_args)
+            for batch_idx, (inputs, _) in enumerate(calibration_loader):
+                if isinstance(inputs, (list, tuple)):
+                    prepared_module(*[inp.to(device) for inp in inputs])
+                else:
+                    prepared_module(inputs.to(device))
                 if (batch_idx + 1) % 10 == 0:
-                    print(f"  Processed {batch_idx + 1} batches...")
+                    print(f"  Processed {batch_idx + 1} calibration batches...")
         
-        # Convert to quantized model (inplace operation)
-        print("Converting to quantized model...")
-        torch.quantization.convert(model, inplace=True)
-        
-        print("✓ Quantization complete!")
-        return model
+        print("Converting prepared model to quantized form...")
+        quantized_module = convert_pt2e(prepared_module)
+        allow_exported_model_train_eval(quantized_module)
+        print("✓ torchao PTQ complete!")
+        return quantized_module, example_args
     
     @staticmethod
     def create_calibration_loader(dataset_path, num_samples=200, batch_size=16):
@@ -161,28 +192,36 @@ class QuantizationUtils:
             batch_size=batch_size,
             shuffle=False,
             num_workers=0,
-            pin_memory=False
+            pin_memory=False,
+            drop_last=True
         )
         
         return loader
     
     @staticmethod
-    def save_quantized_model(model, save_path):
+    def save_quantized_model(model, save_path, example_args=None):
         """
         Save quantized PyTorch model
         
-        For quantized models, we save both state_dict and complete model
-        as quantized models can be tricky to reconstruct
+        For torchao quantized models we save both the state_dict and an exported
+        program that can be reloaded later.
         """
+        if example_args is None:
+            raise ValueError("example_args must be provided to save quantized model export.")
+        
         # Save state_dict
         torch.save(model.state_dict(), save_path)
         
-        # Also save complete model for easier loading
-        complete_model_path = save_path.replace('.pth', '_complete.pth')
-        torch.save(model, complete_model_path)
+        # Export the quantized graph for reliable reloading
+        if not isinstance(example_args, (tuple, list)):
+            example_args = (example_args,)
+        example_args = tuple(example_args)
+        exported_program = torch.export.export(model, example_args)
+        complete_model_path = save_path.replace('.pth', '_complete.pt2')
+        torch.export.save(exported_program, complete_model_path)
         
-        print(f"Quantized model saved to {save_path}")
-        print(f"Complete quantized model saved to {complete_model_path}")
+        print(f"Quantized model state_dict saved to {save_path}")
+        print(f"Exported quantized program saved to {complete_model_path}")
     
     @staticmethod
     def load_quantized_model(model_class, model_config, model_path, input_shape=None):

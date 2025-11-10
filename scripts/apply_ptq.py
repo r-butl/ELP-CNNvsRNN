@@ -20,11 +20,7 @@ from models.resnet18_model import ResNet18Model
 from quantization_utils import QuantizationUtils
 
 # Set quantized backend early to ensure it's used for all quantization operations
-try:
-    torch.backends.quantized.engine = 'qnnpack'
-except AttributeError:
-    pass
-os.environ['PYTORCH_QUANTIZED_ENGINE'] = 'qnnpack'
+QuantizationUtils.configure_quantized_engine(verbose=True)
 
 
 def get_device():
@@ -109,15 +105,19 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     
     # Apply PTQ
     print("\nApplying Post-Training Quantization...")
-    quantized_model = QuantizationUtils.apply_ptq_to_model(
+    # Extract example inputs from calibration loader for torchao export
+    example_batch, _ = next(iter(calibration_loader))
+    
+    quantized_model, example_args = QuantizationUtils.apply_ptq_to_model(
         model=original_model,
         calibration_loader=calibration_loader,
+        example_inputs=example_batch,
         device=device
     )
     
     # Save quantized model
     quantized_model_path = os.path.join(ptq_folder, f'{model_type}_model_quantized.pth')
-    QuantizationUtils.save_quantized_model(quantized_model, quantized_model_path)
+    QuantizationUtils.save_quantized_model(quantized_model, quantized_model_path, example_args=example_args)
     
     # Save model configuration
     config_file = os.path.join(ptq_folder, 'model_config.json')

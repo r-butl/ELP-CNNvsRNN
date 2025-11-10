@@ -12,6 +12,9 @@ seaborn>=0.13.0
 pyyaml>=6.0
 pandas>=2.0.0
 
+# Quantization stack
+torchao>=0.14.0
+
 # Hyperparameter optimization (Optuna for PyTorch)
 optuna>=3.0.0
 
