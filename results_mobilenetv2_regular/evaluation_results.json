@@ -1,0 +1,22 @@
+{
+  "model_type": "mobilenetv2",
+  "test_type": "regular",
+  "metrics": {
+    "accuracy": 0.941304347826087,
+    "precision": 0.9117647058823529,
+    "recall": 0.9771739130434782,
+    "f1_score": 0.9433368310598111,
+    "auc": 0.9918608223062382
+  },
+  "confusion_matrix": [
+    [
+      833,
+      87
+    ],
+    [
+      21,
+      899
+    ]
+  ],
+  "num_samples": 1840
+}
