@@ -1,0 +1,22 @@
+{
+  "model_type": "resnet18",
+  "test_type": "qat",
+  "metrics": {
+    "accuracy": 0.5005434782608695,
+    "precision": 0.5002718868950516,
+    "recall": 1.0,
+    "f1_score": 0.666908300108735,
+    "auc": 0.33681060964083176
+  },
+  "confusion_matrix": [
+    [
+      1,
+      919
+    ],
+    [
+      0,
+      920
+    ]
+  ],
+  "num_samples": 1840
+}

@@ -1,0 +1,22 @@
+{
+  "model_type": "resnet18",
+  "test_type": "ptq",
+  "metrics": {
+    "accuracy": 0.8951086956521739,
+    "precision": 0.8307552320291174,
+    "recall": 0.9923913043478261,
+    "f1_score": 0.9044081228330857,
+    "auc": 0.9934634924385634
+  },
+  "confusion_matrix": [
+    [
+      734,
+      186
+    ],
+    [
+      7,
+      913
+    ]
+  ],
+  "num_samples": 1840
+}

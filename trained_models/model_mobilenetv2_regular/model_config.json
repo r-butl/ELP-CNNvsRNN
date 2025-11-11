@@ -1,0 +1,12 @@
+{
+  "model_type": "mobilenetv2",
+  "learning_rate": 0.001,
+  "learning_rate_decay_steps": 500,
+  "learning_rate_decay": 1.0,
+  "momentum": 0.5,
+  "batch_size": 4,
+  "epochs": 5,
+  "dropout_rate": 0.2,
+  "activation_function": "ReLU",
+  "optimizer": "adam"
+}
