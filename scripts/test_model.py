@@ -29,8 +29,8 @@ logging.getLogger("torch").setLevel(logging.ERROR)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.utils import read_tfrecords, create_dataloader
-from models.mobilenetv2_model import MobileNetV2Model, QuantizedMobileNetV2Model
-from models.resnet18_model import ResNet18Model, QuantizedResNet18Model
+from models.mobilenetv2_model import MobileNetV2Model
+from models.resnet18_model import ResNet18Model
 from scripts.quantization_utils import QuantizationUtils
 
 
@@ -117,12 +117,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     
     # Get device first (needed for data loader settings)
     device = get_device(test_type)
-    print(f"Using device: {device}")
-    if test_type in ["ptq", "qat"]:
-        print("  Note: Quantized models must run on CPU due to CUDA limitations")
-        # Configure quantization backend for QAT/PTQ models (must be done early)
-        QuantizationUtils.configure_quantized_engine(verbose=True)
-    
+
     # Load test dataset
     print("\nLoading test dataset...")
     test_dataset = read_tfrecords(
@@ -141,7 +136,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     use_pin_memory = device.type == 'cuda'
     test_loader = create_dataloader(
         test_dataset,
-        batch_size=1,
+        batch_size=16,
         shuffle=False,
         num_workers=0,
         pin_memory=use_pin_memory,
@@ -335,11 +330,6 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     # Convert to numpy arrays
     predictions = np.array(predictions)
     true_labels = np.array(true_labels)
-
-    create_results_summary(predictions, true_labels)
-
-    
-def create_results_summary(predictions, true_labels):
 
     # Calculate binary predictions
     binary_predictions = (predictions > 0.5).astype(int)

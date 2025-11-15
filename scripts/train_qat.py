@@ -234,7 +234,6 @@ def train_model(model_type, config_path, best_config_path=None):
                     predictions = (outputs > 0.5).float()
                     val_correct += (predictions == labels).sum().item()
                     val_total += labels.size(0)
-                    break
             
             # Calculate validation metrics
             avg_val_loss = val_loss / val_total
@@ -297,7 +296,6 @@ def train_model(model_type, config_path, best_config_path=None):
             
             raise
             
-        break
 
     # Convert prepared model to quantized model
     print("\nConverting model to quantized model...")

@@ -11,18 +11,14 @@ import torch
 import argparse
 from datetime import datetime
 from pathlib import Path
+from utils import read_tfrecords, get_dataset_length, create_dataloader
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.utils import read_tfrecords
+from scripts.utils import read_tfrecords, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
-from scripts.quantization_utils import QuantizationUtils
-
-# Set quantized backend early to ensure it's used for all quantization operations
-QuantizationUtils.configure_quantized_engine(verbose=True)
-
 
 def get_device():
     """Get available device (CPU for quantization)"""
@@ -30,7 +26,7 @@ def get_device():
     return torch.device("cpu")
 
 
-def apply_ptq_to_model(model_type, model_path, config_path):
+def apply_ptq_to_model(model_type, model_path, config_path, num_calibration_samples=500):
     """Apply Post-Training Quantization to a trained model"""
     
     # Load configuration
@@ -60,6 +56,21 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     # Get input shape from first sample
     sample, label = train_dataset[0]
     input_shape = tuple(sample.shape[1:]) + (sample.shape[0],)  # Convert (C, H, W) to (H, W, C) for config
+
+    # Load the calibration data
+    indices = list(range(num_calibration_samples))
+    dataset = torch.utils.data.Subset(train_dataset, indices)
+
+    # Create calibration loader
+    print("\nCreating calibration loader...")
+    calibration_loader = create_dataloader(
+        dataset=dataset,
+        batch_size=16,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=True
+    )
     
     print(f"Input shape (HWC format): {input_shape}")
     
@@ -96,39 +107,16 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     original_model = original_model.to(device)
     original_model.eval()
     
-    # Save a copy of the original model for size comparison
-    # (since quantize_ modifies in-place)
-    import copy
-    original_model_copy = copy.deepcopy(original_model)
-    
-    # Create calibration loader
-    print("\nCreating calibration loader...")
-    calibration_loader = QuantizationUtils.create_calibration_loader(
-        dataset_path=os.path.join(cfg['data']['dataset_folder'], cfg['data']['train_file']),
-        num_samples=200,
-        batch_size=16
-    )
-    
-    # Apply dynamic quantization for file size reduction
-    # Dynamic quantization quantizes weights to INT8 but keeps activations in FP32
-    # This works better with models that have operations not fully supported by static quantization
-    import torch.ao.quantization as tq
-    
-    print("Applying dynamic quantization (INT8 weights for file size reduction)...")
-    print("  This will quantize weights to INT8 and reduce model file size.")
-    print("  Activations remain in FP32 for compatibility.")
-    
-    # Apply dynamic quantization to Linear and Conv layers
-    # This quantizes weights to INT8 but keeps activations in FP32
-    quantized_model = tq.quantize_dynamic(
-        original_model,
-        {torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d},
-        dtype=torch.qint8
-    )
-    
-    print("✓ Dynamic quantization complete! Model weights are now INT8.")
-    print(f"Quantized model type: {type(quantized_model)}")
-    
+
+
+
+
+
+
+
+
+
+
     # Save quantized model
     quantized_model_path = os.path.join(ptq_folder, f'{model_type}_model_quantized.pth')
     
@@ -143,21 +131,7 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     with open(config_file, 'w') as f:
         json.dump(model_config, f, indent=2)
     
-    # Compare model sizes
-    print("\nComparing model sizes...")
-    size_comparison = QuantizationUtils.compare_model_sizes(
-        original_model=original_model_copy,  # Use the copy before quantization
-        quantized_model=quantized_model,
-        temp_dir=os.path.join(ptq_folder, 'temp')
-    )
-    
-    # Save size comparison to JSON
-    size_info_file = os.path.join(ptq_folder, 'size_comparison.json')
-    with open(size_info_file, 'w') as f:
-        json.dump(size_comparison, f, indent=2)
-    
-    print(f"\n✓ PTQ completed successfully!")
-    print(f"  Quantized model saved to: {quantized_model_path}")
+)
     print(f"  Size comparison saved to: {size_info_file}")
     
     return ptq_folder

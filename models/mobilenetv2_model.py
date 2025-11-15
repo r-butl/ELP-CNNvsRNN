@@ -65,24 +65,3 @@ class MobileNetV2Model(nn.Module):
         x = self.dequant(x)
         return x
 
-
-class QuantizedMobileNetV2Model(nn.Module):
-    """MobileNetV2 with quantization-aware training support"""
-    
-    def __init__(self, model_config, training=True, input_shape=None, pretrained=False):
-        super().__init__()
-        
-        # Create base model
-        self.model = MobileNetV2Model(
-            model_config=model_config,
-            training=training,
-            input_shape=input_shape,
-            pretrained=pretrained
-        )
-        
-        # Configure for QAT if training
-        if training:
-            self.model.qconfig = torch.quantization.get_default_qat_qconfig('qnnpack')
-    
-    def forward(self, x):
-        return self.model(x)
