@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Quantization Aware Training (QAT) script for PyTorch models
-Supports MobileNetV2 and ResNet18 with QAT
+Regular training script for PyTorch models
+Supports MobileNetV2 and ResNet18
 With gradient accumulation and TensorFlow-like memory management
 """
 
@@ -16,40 +16,32 @@ import argparse
 from datetime import datetime
 import csv
 from torch.utils.tensorboard import SummaryWriter
+from torchao.quantization.qat import QATConfig
+from torchao.quantization import quantize_, Int8DynamicActivationInt4WeightConfig
 
 # Configure PyTorch to use TensorFlow-like memory management
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
-
-try:
-    from torch.ao.quantization import prepare_qat, convert
-except ImportError:
-    from torch.quantization import prepare_qat, convert
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import read_tfrecords, get_dataset_length, create_dataloader
-from models.mobilenetv2_model import QuantizedMobileNetV2Model
-from models.resnet18_model import QuantizedResNet18Model
+from models.mobilenetv2_model import MobileNetV2Model
+from models.resnet18_model import ResNet18Model
 
 
 def get_device():
-    """Get available device (CPU for QAT - quantization not fully supported on MPS/CUDA)"""
-    # QAT works best on CPU for now
-    return torch.device("cpu")
+    """Get available device (MPS for Apple Silicon, CUDA for NVIDIA, CPU otherwise)"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
 
 
-def train_qat_model(model_type, config_path, best_config_path=None, pretrained_model_path=None):
-    """Train a model with Quantization Aware Training
-    
-    Args:
-        model_type: Type of model ('mobilenetv2' or 'resnet18')
-        config_path: Path to configuration file
-        best_config_path: Path to best configuration from cross-validation
-        pretrained_model_path: Path to pre-trained model weights (optional)
-                              If provided, QAT will start from these weights
-                              If None, QAT will start from scratch
-    """
+def train_model(model_type, config_path, best_config_path=None):
+    """Train a model with the best configuration from cross-validation"""
     
     # Load configuration
     with open(config_path, 'r') as f:
@@ -74,22 +66,8 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
     with open(best_config_path, 'r') as f:
         best_config = json.load(f)
     
-    # Determine training mode
-    if pretrained_model_path and os.path.exists(pretrained_model_path):
-        training_mode = "QAT from pre-trained model"
-        print(f"Training {model_type} with QAT from pre-trained model:")
-        print(f"  Pre-trained model: {pretrained_model_path}")
-        print(f"  ✅ Pre-trained model file found and will be loaded")
-    else:
-        training_mode = "QAT from scratch"
-        print(f"Training {model_type} with QAT from scratch:")
-        if pretrained_model_path:
-            print(f"  ❌ Pre-trained model not found at: {pretrained_model_path}")
-            print(f"  Continuing with QAT from scratch...")
-        else:
-            print(f"  No pre-trained model specified, starting from scratch")
-    
-    print(f"  Configuration: {json.dumps(best_config, indent=2)}")
+    print(f"Training {model_type} with configuration:")
+    print(json.dumps(best_config, indent=2))
     
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -124,87 +102,46 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
         batch_size=best_config['batch_size'],
         shuffle=True,
         num_workers=0,
-        pin_memory=False  # CPU only for QAT
+        pin_memory=True
     )
     val_loader = create_dataloader(
         val_dataset,
         batch_size=best_config['batch_size'],
         shuffle=False,
         num_workers=0,
-        pin_memory=False
+        pin_memory=True
     )
     
-    # Get device (CPU for QAT)
+    # Get device
     device = get_device()
-    print(f"\nUsing device: {device} (QAT requires CPU)")
+    print(f"\nUsing device: {device}")
     
-    # Create quantized model
-    print(f"\nCreating quantized {model_type} model...")
+    # Create model
+    print(f"\nCreating {model_type} model...")
     if model_type == 'mobilenetv2':
-        qat_model = QuantizedMobileNetV2Model(model_config=best_config, training=True, input_shape=input_shape)
+        model = MobileNetV2Model(model_config=best_config, training=True, input_shape=input_shape)
     elif model_type == 'resnet18':
-        qat_model = QuantizedResNet18Model(model_config=best_config, training=True, input_shape=input_shape)
+        model = ResNet18Model(model_config=best_config, training=True, input_shape=input_shape)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
-    # Load pre-trained weights if provided
-    if pretrained_model_path and os.path.exists(pretrained_model_path):
-        print(f"Loading pre-trained weights from: {pretrained_model_path}")
-        try:
-            # Load the pre-trained weights
-            pretrained_state_dict = torch.load(pretrained_model_path, map_location='cpu')
-            
-            # Filter out any quantization-specific keys that might not match
-            filtered_state_dict = {}
-            for key, value in pretrained_state_dict.items():
-                # Skip quantization-specific keys that might not exist in the base model
-                if not any(qat_key in key for qat_key in ['_packed_params', 'scale', 'zero_point', 'activation_post_process']):
-                    filtered_state_dict[key] = value
-            
-            # Load the filtered weights
-            missing_keys, unexpected_keys = qat_model.load_state_dict(filtered_state_dict, strict=False)
-            
-            if missing_keys:
-                print(f"  ⚠️  Missing keys (will use random initialization): {len(missing_keys)}")
-                if len(missing_keys) <= 5:  # Only show details if few missing keys
-                    for key in missing_keys:
-                        print(f"    - {key}")
-                else:
-                    print(f"    - {missing_keys[0]} ... and {len(missing_keys)-1} more")
-            
-            if unexpected_keys:
-                print(f"  ⚠️  Unexpected keys (ignored): {len(unexpected_keys)}")
-                if len(unexpected_keys) <= 5:  # Only show details if few unexpected keys
-                    for key in unexpected_keys:
-                        print(f"    - {key}")
-                else:
-                    print(f"    - {unexpected_keys[0]} ... and {len(unexpected_keys)-1} more")
-            
-            print("  ✅ Pre-trained weights loaded successfully")
-            
-        except Exception as e:
-            print(f"  ❌ Error loading pre-trained weights: {e}")
-            print(f"  Continuing with QAT from scratch...")
-            training_mode = "QAT from scratch (pre-trained loading failed)"
-    else:
-        print("Starting QAT from scratch (no pre-trained model provided)")
+    model = model.to(device)
     
     # Prepare model for QAT
-    print(f"\nPreparing model for QAT ({training_mode})...")
-    qat_model = prepare_qat(qat_model.model)
-    qat_model = qat_model.to(device)
+    print("\nPreparing model for QAT...")
+    base_config = Int8DynamicActivationInt4WeightConfig(group_size=2)
+    quantize_(model, QATConfig(base_config, step="prepare"))
     
     # Loss function
     criterion = nn.BCELoss()
     
-    # Optimizer (typically use lower learning rate for QAT)
-    qat_lr = cfg['quantization']['qat_learning_rate']
+    # Optimizer
     if best_config["optimizer"] == "adam":
-        optimizer = optim.Adam(qat_model.parameters(), lr=qat_lr)
+        optimizer = optim.Adam(model.parameters(), lr=best_config['learning_rate'])
     elif best_config["optimizer"] == "sgd":
         optimizer = optim.SGD(
-            qat_model.parameters(),
-            lr=qat_lr,
+            model.parameters(),
+            lr=best_config['learning_rate'],
             momentum=best_config.get('momentum', 0.9)
         )
     else:
@@ -221,30 +158,27 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
     writer = SummaryWriter(log_dir=os.path.join(run_folder, 'logs'))
     
     # Training loop
-    print(f"\nStarting QAT training...")
-    print(f"  Training mode: {training_mode}")
-    print(f"  Max epochs: {cfg['quantization']['qat_epochs']}")
+    print(f"\nStarting training...")
+    print(f"  Max epochs: {cfg['training']['max_epochs']}")
     print(f"  Batch size: {best_config['batch_size']}")
-    print(f"  Learning rate: {qat_lr} (lower for QAT)")
     print(f"  Early stopping patience: {cfg['training']['patience']}")
     
-    # Clear GPU cache before training (QAT is memory intensive!)
+    # Clear GPU cache before training
     if device.type == 'cuda':
         torch.cuda.empty_cache()
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
-        print(f"  Using TensorFlow-like memory management")
+        print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         print(f"  Gradient accumulation: 8× (effective batch = {best_config['batch_size']} × 8 = {best_config['batch_size'] * 8})")
-        print(f"  ⚠️  QAT requires more memory than regular training")
     
     best_val_loss = float('inf')
     patience_counter = 0
     training_history = []
     accumulation_steps = 8  # Simulate larger batches
     
-    for epoch in range(cfg['quantization']['qat_epochs']):
+    for epoch in range(cfg['training']['max_epochs']):
         try:
             # Training phase
-            qat_model.train()
+            model.train()
             train_loss = 0.0
             train_correct = 0
             train_total = 0
@@ -256,19 +190,7 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                 labels = labels.to(device)
                 
                 # Forward pass
-                outputs = qat_model(inputs).squeeze()
-                # Ensure labels and outputs have the same shape
-                if labels.dim() > outputs.dim():
-                    labels = labels.squeeze()
-                elif outputs.dim() > labels.dim():
-                    outputs = outputs.unsqueeze(-1)
-                
-                # Ensure both tensors have at least 1 dimension for loss calculation
-                if outputs.dim() == 0:
-                    outputs = outputs.unsqueeze(0)
-                if labels.dim() == 0:
-                    labels = labels.unsqueeze(0)
-                
+                outputs = model(inputs).squeeze(-1)
                 loss = criterion(outputs, labels)
                 
                 # Scale loss for gradient accumulation
@@ -286,11 +208,8 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                 train_correct += (predictions == labels).sum().item()
                 train_total += labels.size(0)
                 
-                if batch_idx % 50 == 0:
-                    print(f"  Epoch {epoch+1}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item() * accumulation_steps:.4f}")
-                
-                # Clear GPU memory more frequently for QAT
-                if batch_idx % 25 == 0 and device.type == 'cuda':
+                # Clear some memory periodically
+                if batch_idx % 50 == 0 and device.type == 'cuda':
                     torch.cuda.empty_cache()
             
             # Calculate training metrics
@@ -298,7 +217,7 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
             train_accuracy = train_correct / train_total
             
             # Validation phase
-            qat_model.eval()
+            model.eval()
             val_loss = 0.0
             val_correct = 0
             val_total = 0
@@ -308,25 +227,14 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                     inputs = inputs.to(device)
                     labels = labels.to(device)
                     
-                    outputs = qat_model(inputs).squeeze()
-                    # Ensure labels and outputs have the same shape
-                    if labels.dim() > outputs.dim():
-                        labels = labels.squeeze()
-                    elif outputs.dim() > labels.dim():
-                        outputs = outputs.unsqueeze(-1)
-                    
-                    # Ensure both tensors have at least 1 dimension for loss calculation
-                    if outputs.dim() == 0:
-                        outputs = outputs.unsqueeze(0)
-                    if labels.dim() == 0:
-                        labels = labels.unsqueeze(0)
-                    
+                    outputs = model(inputs).squeeze(-1)
                     loss = criterion(outputs, labels)
                     
                     val_loss += loss.item() * inputs.size(0)
                     predictions = (outputs > 0.5).float()
                     val_correct += (predictions == labels).sum().item()
                     val_total += labels.size(0)
+                    break
             
             # Calculate validation metrics
             avg_val_loss = val_loss / val_total
@@ -336,7 +244,7 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
             scheduler.step()
             
             # Log metrics
-            print(f"Epoch {epoch+1}/{cfg['quantization']['qat_epochs']} - "
+            print(f"Epoch {epoch+1}/{cfg['training']['max_epochs']} - "
                   f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f} - "
                   f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
             
@@ -361,9 +269,9 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
             if avg_val_loss < best_val_loss - cfg['training']['min_delta']:
                 best_val_loss = avg_val_loss
                 patience_counter = 0
-                # Save best QAT model
-                torch.save(qat_model.state_dict(), os.path.join(run_folder, f'{model_type}_qat_model_best.pth'))
-                print(f"  ✓ Saved best QAT model (val_loss: {best_val_loss:.4f})")
+                # Save best model
+                torch.save(model.state_dict(), os.path.join(run_folder, f'{model_type}_model_best.pth'))
+                print(f"  ✓ Saved best model (val_loss: {best_val_loss:.4f})")
             else:
                 patience_counter += 1
                 print(f"  No improvement for {patience_counter} epoch(s)")
@@ -375,13 +283,12 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                 
         except torch.cuda.OutOfMemoryError:
             print(f"\n❌ Out of memory error at epoch {epoch+1}")
-            print(f"   QAT requires ~2x more memory than regular training")
             print(f"   Try reducing batch_size in config (current: {best_config['batch_size']})")
-            print(f"   Current batch_size: {best_config['batch_size']} → Try: {best_config['batch_size']//2}")
+            print(f"   Or use a smaller model")
             
             # Save what we have so far
             if training_history:
-                csv_file = os.path.join(run_folder, 'qat_training_results_partial.csv')
+                csv_file = os.path.join(run_folder, 'training_results_partial.csv')
                 with open(csv_file, 'w', newline='') as f:
                     writer_csv = csv.DictWriter(f, fieldnames=training_history[0].keys())
                     writer_csv.writeheader()
@@ -389,61 +296,26 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
                 print(f"   Partial results saved to: {run_folder}")
             
             raise
+            
+        break
+
+    # Convert prepared model to quantized model
+    print("\nConverting model to quantized model...")
+    quantize_(model, QATConfig(Int8DynamicActivationInt4WeightConfig(group_size=2), step="convert"))
     
-    # Convert to quantized model (with error handling)
-    print("\n" + "="*60)
-    print("Converting QAT model to fully quantized model...")
-    print("="*60)
-    qat_model.eval()
+    # Save final model weights
+    torch.save(model.state_dict(), os.path.join(run_folder, f'{model_type}_model_final_weights.pth'))
     
-    quantization_successful = False
-    try:
-        quantized_model = convert(qat_model)
-        print("✅ Successfully converted to INT8 quantized model!")
-        quantization_successful = True
-    except RuntimeError as e:
-        if "NoQEngine" in str(e) or "quantized::conv2d_prepack" in str(e):
-            print("⚠️  Quantization engine not available on this platform")
-            print("   → Saving QAT-trained model without final INT8 conversion")
-            print("   → Model was trained with quantization awareness (still beneficial!)")
-            print("   → Consider using dynamic quantization instead:")
-            print("      python scripts/apply_dynamic_quantization.py --model {} --model_path {}".format(
-                model_type, run_folder))
-            quantized_model = qat_model
-        else:
-            raise
-    
-    print("="*60)
-    
-    # Save final models
-    torch.save(qat_model.state_dict(), os.path.join(run_folder, f'{model_type}_qat_model_final_weights.pth'))
-    torch.save(quantized_model.state_dict(), os.path.join(run_folder, f'{model_type}_quantized_model_final.pth'))
-    
-    # Try to save complete model, but only state_dict if it fails
-    try:
-        torch.save(quantized_model, os.path.join(run_folder, f'{model_type}_quantized_model_complete.pth'))
-    except (AttributeError, RuntimeError) as e:
-        print(f"⚠️  Could not save complete model (pickle error): {e}")
-        print("   Saved state_dict only - use model architecture to load")
-        # Save a note about how to load
-        load_instructions = {
-            "note": "Complete model could not be saved due to quantization pickle issues",
-            "how_to_load": "Create model instance and use model.load_state_dict(torch.load('weights.pth'))",
-            "weights_file": f"{model_type}_quantized_model_final.pth"
-        }
-        with open(os.path.join(run_folder, 'load_instructions.json'), 'w') as f:
-            json.dump(load_instructions, f, indent=2)
+    # Save complete model (architecture + weights)
+    torch.save(model, os.path.join(run_folder, f'{model_type}_model_complete.pth'))
     
     # Save model configuration
-    config_file = os.path.join(run_folder, 'qat_model_config.json')
-    config_to_save = best_config.copy()
-    config_to_save['training_mode'] = training_mode
-    config_to_save['pretrained_model_path'] = pretrained_model_path if pretrained_model_path else None
+    config_file = os.path.join(run_folder, 'model_config.json')
     with open(config_file, 'w') as f:
-        json.dump(config_to_save, f, indent=2)
+        json.dump(best_config, f, indent=2)
     
     # Save training history to CSV
-    csv_file = os.path.join(run_folder, 'qat_training_results.csv')
+    csv_file = os.path.join(run_folder, 'training_results.csv')
     with open(csv_file, 'w', newline='') as f:
         if training_history:
             writer_csv = csv.DictWriter(f, fieldnames=training_history[0].keys())
@@ -453,25 +325,8 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
     # Close TensorBoard writer
     writer.close()
     
-    # Compare model sizes (only if quantization was successful)
-    if quantization_successful:
-        print("\nComparing model sizes...")
-        from quantization_utils import QuantizationUtils
-        
-        # Create a temporary FP32 model for comparison
-        if model_type == 'mobilenetv2':
-            from models.mobilenetv2_model import MobileNetV2Model
-            fp32_model = MobileNetV2Model(model_config=best_config, training=False, input_shape=input_shape)
-        else:
-            from models.resnet18_model import ResNet18Model
-            fp32_model = ResNet18Model(model_config=best_config, training=False, input_shape=input_shape)
-        
-        QuantizationUtils.compare_model_sizes(fp32_model, quantized_model, temp_dir=run_folder)
-    else:
-        print("\n⚠️  Skipping size comparison (quantization not fully completed)")
-    
     # Print summary
-    print(f"\nQAT training completed!")
+    print(f"\nTraining completed!")
     if training_history:
         print(f"  Final train accuracy: {training_history[-1]['train_accuracy']:.4f}")
         print(f"  Final val accuracy: {training_history[-1]['val_accuracy']:.4f}")
@@ -483,21 +338,13 @@ def train_qat_model(model_type, config_path, best_config_path=None, pretrained_m
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Quantization Aware Training with PyTorch")
+    parser = argparse.ArgumentParser(description="Regular training with PyTorch")
     parser.add_argument("--model", choices=["mobilenetv2", "resnet18"], required=True, help="Model type")
     parser.add_argument("--config", default="config.yaml", help="Configuration file")
     parser.add_argument("--best_config", default=None, help="Path to best configuration from CV")
-    parser.add_argument("--pretrained_model", default=None, help="Path to pre-trained model weights (optional). If provided, QAT will start from these weights. If not provided, QAT will start from scratch.")
     
     args = parser.parse_args()
     
-    # Validate pre-trained model path if provided
-    pretrained_model_path = args.pretrained_model
-    if pretrained_model_path and not os.path.exists(pretrained_model_path):
-        print(f"⚠️  Warning: Pre-trained model path does not exist: {pretrained_model_path}")
-        print("   Will continue with QAT from scratch")
-        pretrained_model_path = None
-    
-    # Run QAT training
-    output_folder = train_qat_model(args.model, args.config, args.best_config, pretrained_model_path)
-    print(f"\n✅ QAT training completed. Output folder: {output_folder}")
+    # Run training
+    output_folder = train_model(args.model, args.config, args.best_config)
+    print(f"\n✅ Training completed. Output folder: {output_folder}")

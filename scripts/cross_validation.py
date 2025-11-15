@@ -22,7 +22,7 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segmen
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import read_tfrecords, get_dataset_length, create_dataloader
+from scripts.utils import read_tfrecords, get_dataset_length, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
 

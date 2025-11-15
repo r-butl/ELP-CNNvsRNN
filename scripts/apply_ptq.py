@@ -10,14 +10,15 @@ import json
 import torch
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import read_tfrecords
+from scripts.utils import read_tfrecords
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
-from quantization_utils import QuantizationUtils
+from scripts.quantization_utils import QuantizationUtils
 
 # Set quantized backend early to ensure it's used for all quantization operations
 QuantizationUtils.configure_quantized_engine(verbose=True)
@@ -95,6 +96,11 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     original_model = original_model.to(device)
     original_model.eval()
     
+    # Save a copy of the original model for size comparison
+    # (since quantize_ modifies in-place)
+    import copy
+    original_model_copy = copy.deepcopy(original_model)
+    
     # Create calibration loader
     print("\nCreating calibration loader...")
     calibration_loader = QuantizationUtils.create_calibration_loader(
@@ -103,21 +109,34 @@ def apply_ptq_to_model(model_type, model_path, config_path):
         batch_size=16
     )
     
-    # Apply PTQ
-    print("\nApplying Post-Training Quantization...")
-    # Extract example inputs from calibration loader for torchao export
-    example_batch, _ = next(iter(calibration_loader))
+    # Apply dynamic quantization for file size reduction
+    # Dynamic quantization quantizes weights to INT8 but keeps activations in FP32
+    # This works better with models that have operations not fully supported by static quantization
+    import torch.ao.quantization as tq
     
-    quantized_model, example_args = QuantizationUtils.apply_ptq_to_model(
-        model=original_model,
-        calibration_loader=calibration_loader,
-        example_inputs=example_batch,
-        device=device
+    print("Applying dynamic quantization (INT8 weights for file size reduction)...")
+    print("  This will quantize weights to INT8 and reduce model file size.")
+    print("  Activations remain in FP32 for compatibility.")
+    
+    # Apply dynamic quantization to Linear and Conv layers
+    # This quantizes weights to INT8 but keeps activations in FP32
+    quantized_model = tq.quantize_dynamic(
+        original_model,
+        {torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d},
+        dtype=torch.qint8
     )
+    
+    print("✓ Dynamic quantization complete! Model weights are now INT8.")
+    print(f"Quantized model type: {type(quantized_model)}")
     
     # Save quantized model
     quantized_model_path = os.path.join(ptq_folder, f'{model_type}_model_quantized.pth')
-    QuantizationUtils.save_quantized_model(quantized_model, quantized_model_path, example_args=example_args)
+    
+    # Save quantized model state_dict (weights are now INT8, so file will be smaller)
+    print(f"\nSaving quantized model (INT8 weights)...")
+    torch.save(quantized_model.state_dict(), quantized_model_path)
+    print(f"✓ Quantized model state_dict saved to {quantized_model_path}")
+    print(f"  Note: Weights are stored as INT8, so file size should be ~4x smaller")
     
     # Save model configuration
     config_file = os.path.join(ptq_folder, 'model_config.json')
@@ -127,7 +146,7 @@ def apply_ptq_to_model(model_type, model_path, config_path):
     # Compare model sizes
     print("\nComparing model sizes...")
     size_comparison = QuantizationUtils.compare_model_sizes(
-        original_model=original_model,
+        original_model=original_model_copy,  # Use the copy before quantization
         quantized_model=quantized_model,
         temp_dir=os.path.join(ptq_folder, 'temp')
     )

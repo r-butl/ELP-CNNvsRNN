@@ -11,7 +11,6 @@ import json
 import torch
 import torch.nn as nn
 import torch.quantization
-from torchao.quantization.pt2e import allow_exported_model_train_eval
 import numpy as np
 import argparse
 import csv
@@ -29,16 +28,16 @@ logging.getLogger("torch").setLevel(logging.ERROR)
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import read_tfrecords, create_dataloader
+from scripts.utils import read_tfrecords, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model, QuantizedMobileNetV2Model
 from models.resnet18_model import ResNet18Model, QuantizedResNet18Model
-from quantization_utils import QuantizationUtils
+from scripts.quantization_utils import QuantizationUtils
 
 
 def get_device(test_type="regular"):
     """Get available device"""
-    # Quantized models must run on CPU due to CUDA limitations
-    if test_type == "ptq":
+    # Quantized models (QAT and PTQ) must run on CPU due to CUDA limitations
+    if test_type in ["ptq", "qat"]:
         return torch.device("cpu")
     
     if torch.backends.mps.is_available():
@@ -64,6 +63,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         cfg = yaml.safe_load(f)
     
     # Determine if model_path is a file or directory
+    model_file = None
     if os.path.isfile(model_path):
         # Direct model file provided
         model_file = model_path
@@ -95,7 +95,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         model_config = {
             'activation_function': 'ReLU',
             'dropout_rate': 0.2,
-            'batch_size': 32
+            'batch_size': 1
         }
     else:
         print(f"Using model config file: {model_config_file}")
@@ -107,7 +107,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             model_config = {
                 'activation_function': 'ReLU',
                 'dropout_rate': 0.2,
-                'batch_size': 32
+                'batch_size': 1
             }
                 
     # Create output directory
@@ -118,8 +118,10 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     # Get device first (needed for data loader settings)
     device = get_device(test_type)
     print(f"Using device: {device}")
-    if test_type == "ptq":
+    if test_type in ["ptq", "qat"]:
         print("  Note: Quantized models must run on CPU due to CUDA limitations")
+        # Configure quantization backend for QAT/PTQ models (must be done early)
+        QuantizationUtils.configure_quantized_engine(verbose=True)
     
     # Load test dataset
     print("\nLoading test dataset...")
@@ -139,7 +141,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     use_pin_memory = device.type == 'cuda'
     test_loader = create_dataloader(
         test_dataset,
-        batch_size=16,
+        batch_size=1,
         shuffle=False,
         num_workers=0,
         pin_memory=use_pin_memory,
@@ -164,7 +166,7 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             )
         
         # Determine weights path
-        if 'model_file' in locals():
+        if model_file is not None:
             # Direct model file provided
             weights_path = model_file
         else:
@@ -177,11 +179,70 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             raise FileNotFoundError(f"Model weights not found: {weights_path}")
         
         print(f"Loading weights from: {weights_path}")
-        model.load_state_dict(torch.load(weights_path, map_location=device))
+        model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
         model = model.to(device)
-        
+
     elif test_type == "qat":
-        # Load QAT model (before final quantization)
+
+        from torchao.quantization import (
+            quantize_,
+            Int8DynamicActivationInt4WeightConfig,
+        )
+        from torchao.quantization.qat import QATConfig
+
+        # Determine model file paths
+        weights_path = None
+
+
+        # Directory provided - look for complete model first, then weights
+        if os.path.exists(os.path.join(model_dir, f'{model_type}_model_final_weights.pth')):
+            weights_path = os.path.join(model_dir, f'{model_type}_model_final_weights.pth')
+
+        else:
+            print("Could not find QAT model path.")
+            exit()
+
+        print(f"Loading QAT model from state_dict: {weights_path}")
+        
+        # Create base model (same as training)
+        if model_type == 'mobilenetv2':
+            from models.mobilenetv2_model import MobileNetV2Model
+            model = MobileNetV2Model(
+                model_config=model_config,
+                training=False,
+                input_shape=input_shape
+            )
+        elif model_type == 'resnet18':
+            from models.resnet18_model import ResNet18Model
+            model = ResNet18Model(
+                model_config=model_config,
+                training=False,
+                input_shape=input_shape
+            )
+        
+        model = model.to('cpu')
+        
+        # Step 1: Prepare model for QAT (same as training)
+        base_config = Int8DynamicActivationInt4WeightConfig(group_size=2)
+        quantize_(model, QATConfig(base_config, step="prepare"))
+        
+        # Step 2: Convert to quantized model
+        quantize_(model, QATConfig(base_config, step="convert"))
+
+        # Step 3: Load state_dict
+        state = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(state)  # strict=True is safer
+                
+        # Ensure model stays on CPU for quantized models
+        model = model.to('cpu')
+        model.eval()
+        ptq_eval_safe = True
+
+    elif test_type == "ptq":
+        # Load quantized model using dynamic quantization (same as apply_ptq.py)
+        import torch.ao.quantization as tq
+        
+        # Create the model first
         if model_type == 'mobilenetv2':
             model = MobileNetV2Model(
                 model_config=model_config,
@@ -195,55 +256,43 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
                 input_shape=input_shape
             )
         
-        # Determine weights path
-        if 'model_file' in locals():
-            # Direct model file provided
-            weights_path = model_file
-        else:
-            # Directory provided - look for QAT weights
-            weights_path = os.path.join(model_dir, f'{model_type}_qat_model_best.pth')
-            if not os.path.exists(weights_path):
-                weights_path = os.path.join(model_dir, f'{model_type}_qat_model_final_weights.pth')
+        # Set model to eval mode
+        model.eval()
         
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(f"QAT model weights not found: {weights_path}")
-        
-        print(f"Loading QAT weights from: {weights_path}")
-        # Load state dict with strict=False to handle quantization parameters gracefully
-        missing_keys, unexpected_keys = model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
-        
-        # Only show summary of missing/unexpected keys if there are any
-        if missing_keys:
-            print(f"  ⚠️  {len(missing_keys)} missing keys (quantization parameters)")
-        if unexpected_keys:
-            print(f"  ⚠️  {len(unexpected_keys)} unexpected keys (quantization parameters)")
-        
-        model = model.to(device)
-        
-        ptq_eval_safe = True
-    elif test_type == "ptq":
-        # Load torchao PTQ model (GraphModule)
-        complete_candidates = []
-        if 'model_file' in locals():
+        # Determine quantized model path
+        if model_file is not None:
             quantized_path = model_file
         else:
-            complete_candidates = [
-                os.path.join(model_dir, f'{model_type}_model_quantized_complete.pt2'),
-                os.path.join(model_dir, f'{model_type}_quantized_complete.pt2'),
-            ]
-            quantized_path = next((p for p in complete_candidates if os.path.exists(p)), None)
+            quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized.pth')
         
-        if quantized_path is None:
-            raise FileNotFoundError(
-                "Quantized model file not found. Expected one of the following files:\n"
-                + "\n".join(complete_candidates)
-            )
+        if not os.path.exists(quantized_path):
+            raise FileNotFoundError(f"Quantized model file not found: {quantized_path}")
         
-        print(f"Loading torchao quantized model from: {quantized_path}")
-        exported_program = torch.export.load(quantized_path)
-        allow_exported_model_train_eval(exported_program)
-        model = exported_program.module()
-        ptq_eval_safe = False
+        print(f"Loading quantized model from: {quantized_path}")
+        
+        # Apply dynamic quantization (same as in apply_ptq.py)
+        print("  Applying dynamic quantization structure...")
+        quantized_model = tq.quantize_dynamic(
+            model,
+            {torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d},
+            dtype=torch.qint8
+        )
+        
+        # Load the quantized state_dict
+        print("  Loading quantized weights...")
+        state_dict = torch.load(quantized_path, map_location="cpu", weights_only=True)
+        quantized_model.load_state_dict(state_dict)
+        
+        # Use the quantized model
+        model = quantized_model
+        
+        # Ensure model stays on CPU for quantized models
+        model = model.to('cpu')
+        ptq_eval_safe = True
+
+    # Print Parameter size
+    param_bytes = sum(p.element_size() * p.nelement() for p in model.parameters())
+    print(f"Parameter size: {param_bytes / 1e6:.2f} MB")
     
     # Ensure evaluation mode for inference
     if hasattr(model, "eval") and (test_type != "ptq" or ptq_eval_safe):
@@ -258,16 +307,12 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     # For quantized models, use no_grad instead of inference_mode
     # inference_mode can cause issues with quantized models due to hook checking
     # no_grad is sufficient for inference and works better with quantized modules
-    if test_type == "ptq":
-        # Use no_grad for quantized models to avoid hook-related errors
-        context_manager = torch.no_grad()
-    else:
-        context_manager = torch.no_grad()
+    context_manager = torch.no_grad()
     
     with context_manager:
         for batch_idx, (inputs, labels) in enumerate(test_loader):
-            # For quantized models, ensure inputs stay on CPU
-            if test_type == "ptq":
+            # For quantized models (QAT and PTQ), ensure inputs stay on CPU
+            if test_type in ["ptq", "qat"]:
                 inputs = inputs.to('cpu')
                 labels = labels.to('cpu')
             else:
@@ -286,11 +331,16 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
             
             if batch_idx % 10 == 0:
                 print(f"  Processed batch {batch_idx}/{len(test_loader)}")
-    
+
     # Convert to numpy arrays
     predictions = np.array(predictions)
     true_labels = np.array(true_labels)
+
+    create_results_summary(predictions, true_labels)
+
     
+def create_results_summary(predictions, true_labels):
+
     # Calculate binary predictions
     binary_predictions = (predictions > 0.5).astype(int)
     

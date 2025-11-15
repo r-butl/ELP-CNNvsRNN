@@ -7,6 +7,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import tensorflow as tf
+from pathlib import Path
+from collections import Counter
 
 
 def format_time(time):
@@ -108,3 +110,31 @@ def create_dataloader(dataset, batch_size, shuffle=False, num_workers=0, pin_mem
         pin_memory=pin_memory,
         drop_last=drop_last
     )
+
+
+def summarize_tfrecords(data_dir: Path) -> None:
+    tfrecord_files = sorted(data_dir.glob("*.tfrecord"))
+    if not tfrecord_files:
+        print(f"No TFRecord files found in {data_dir}")
+        return
+
+    for tfrecord_path in tfrecord_files:
+        dataset = TFRecordDataset(str(tfrecord_path))
+        total = len(dataset)
+        counter = Counter(dataset.labels)
+
+        print(f"{tfrecord_path.name}:")
+        print(f"  total examples: {total}")
+        for label, count in sorted(counter.items()):
+            percentage = (count / total * 100) if total else 0.0
+            print(f"  label {label}: {count} ({percentage:.1f}%)")
+        print()
+
+
+def main() -> None:
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    summarize_tfrecords(data_dir)
+
+
+if __name__ == "__main__":
+    main()
