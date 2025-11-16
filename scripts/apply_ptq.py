@@ -19,6 +19,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.utils import read_tfrecords, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
+print(f"PyTorch version: {torch.__version__}")
 
 def get_device():
     """Get available device (CPU for quantization)"""
@@ -38,10 +39,10 @@ def apply_ptq_to_model(model_type, model_path, config_path, num_calibration_samp
     with open(config_file, 'r') as f:
         model_config = json.load(f)
     
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ptq_folder = f"ptq_{model_type}_{timestamp}"
-    os.makedirs(ptq_folder, exist_ok=True)
+    # # Create output directory
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ptq_folder = f"ptq_{model_type}_{timestamp}"
+    # os.makedirs(ptq_folder, exist_ok=True)
     
     print(f"Applying PTQ to {model_type} model...")
     print(f"Original model path: {model_path}")
@@ -65,7 +66,7 @@ def apply_ptq_to_model(model_type, model_path, config_path, num_calibration_samp
     print("\nCreating calibration loader...")
     calibration_loader = create_dataloader(
         dataset=dataset,
-        batch_size=16,
+        batch_size=1,
         shuffle=False,
         num_workers=0,
         pin_memory=False,
@@ -107,34 +108,46 @@ def apply_ptq_to_model(model_type, model_path, config_path, num_calibration_samp
     original_model = original_model.to(device)
     original_model.eval()
     
+    #  ###### Begin quantization
+    example_inputs = (sample.unsqueeze(0).to(device),)
+    exported_model = torch.export.export(original_model, example_inputs).module()
 
+    from torchao.quantization.pt2e.quantize_pt2e import (
+        prepare_pt2e,
+        convert_pt2e
+    )
 
+    try:
+        from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
+            get_symmetric_quantization_config,
+            XNNPACKQuantizer,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "XNNPACK quantizer is required for PTQ. Install ExecuTorch: "
+            "`pip install executorch`."
+        ) from exc
+        exit()
 
+    quantizer = XNNPACKQuantizer().set_global(get_symmetric_quantization_config())
+    prepared_model = prepare_pt2e(exported_model, quantizer)
 
+    print("\nCalibrating quantizer statistics...")
+    with torch.no_grad():
+        for inputs, _ in calibration_loader:
+            prepared_model(inputs.to(device))
 
+    print("Converting calibrated model to INT8...")
+    quantized_model = convert_pt2e(prepared_model)
 
+    # print("\nExporting quantized model via torch.export...")
 
+    # quantized_program = torch.export.export(quantized_model, example_inputs, strict=False)  # Basic python interpreter tracing, not using TorchDynamo
+    # quantized_model_path = os.path.join(ptq_folder, f'{model_type}_model_quantized.pt2')
+    # torch.export.save(quantized_program, quantized_model_path)
 
+    return quantized_model
 
-
-    # Save quantized model
-    quantized_model_path = os.path.join(ptq_folder, f'{model_type}_model_quantized.pth')
-    
-    # Save quantized model state_dict (weights are now INT8, so file will be smaller)
-    print(f"\nSaving quantized model (INT8 weights)...")
-    torch.save(quantized_model.state_dict(), quantized_model_path)
-    print(f"✓ Quantized model state_dict saved to {quantized_model_path}")
-    print(f"  Note: Weights are stored as INT8, so file size should be ~4x smaller")
-    
-    # Save model configuration
-    config_file = os.path.join(ptq_folder, 'model_config.json')
-    with open(config_file, 'w') as f:
-        json.dump(model_config, f, indent=2)
-    
-)
-    print(f"  Size comparison saved to: {size_info_file}")
-    
-    return ptq_folder
 
 
 if __name__ == "__main__":
@@ -151,3 +164,26 @@ if __name__ == "__main__":
         print(f"\n✅ PTQ completed successfully. Output folder: {output_folder}")
     else:
         print("\n❌ PTQ failed")
+
+
+    print(f"✓ PT2E quantized program saved to {quantized_model_path}")
+    
+    import io
+    # Quick size comparison
+    def serialized_size_bytes(module):
+        buffer = io.BytesIO()
+        torch.save(module.state_dict(), buffer)
+        return buffer.tell()
+
+    float_bytes = serialized_size_bytes(original_model)
+    int8_bytes = serialized_size_bytes(quantized_model)
+
+    print(f"FP32 size: {float_bytes/1024/1024:.2f} MB")
+    print(f"INT8 size: {int8_bytes/1024/1024:.2f} MB")
+    print(f"Compression: {float_bytes/int8_bytes:.2f}×")
+
+    # Save model configuration
+    config_file = os.path.join(ptq_folder, 'model_config.json')
+    with open(config_file, 'w') as f:
+        json.dump(model_config, f, indent=2)
+        

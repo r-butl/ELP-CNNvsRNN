@@ -8,9 +8,9 @@ import os
 import sys
 import yaml
 import json
+import torch.quantization
 import torch
 import torch.nn as nn
-import torch.quantization
 import numpy as np
 import argparse
 import csv
@@ -20,6 +20,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 import logging
+
+from apply_ptq import apply_ptq_to_model
 
 # Suppress verbose PyTorch output
 warnings.filterwarnings("ignore")
@@ -31,7 +33,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.utils import read_tfrecords, create_dataloader
 from models.mobilenetv2_model import MobileNetV2Model
 from models.resnet18_model import ResNet18Model
-from scripts.quantization_utils import QuantizationUtils
+print(f"PyTorch version: {torch.__version__}")
 
 
 def get_device(test_type="regular"):
@@ -131,12 +133,14 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
     
     print(f"Test dataset size: {len(test_dataset)}")
     print(f"Input shape (HWC format): {input_shape}")
+
+    batch_size = 1 if test_type == "ptq" else 16
     
     # Create data loader with appropriate settings based on device
     use_pin_memory = device.type == 'cuda'
     test_loader = create_dataloader(
         test_dataset,
-        batch_size=16,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=0,
         pin_memory=use_pin_memory,
@@ -234,64 +238,43 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
         ptq_eval_safe = True
 
     elif test_type == "ptq":
-        # Load quantized model using dynamic quantization (same as apply_ptq.py)
-        import torch.ao.quantization as tq
+        # # Load PT2E-exported quantized model
+        # if model_file is not None:
+        #     quantized_path = model_file
+        # else:
+        #     quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized.pt2')
         
-        # Create the model first
-        if model_type == 'mobilenetv2':
-            model = MobileNetV2Model(
-                model_config=model_config,
-                training=False,
-                input_shape=input_shape
-            )
-        elif model_type == 'resnet18':
-            model = ResNet18Model(
-                model_config=model_config,
-                training=False,
-                input_shape=input_shape
-            )
+        # if not os.path.exists(quantized_path):
+        #     raise FileNotFoundError(f"Quantized model file not found: {quantized_path}")
+        #     exit()
         
-        # Set model to eval mode
-        model.eval()
-        
-        # Determine quantized model path
-        if model_file is not None:
-            quantized_path = model_file
-        else:
-            quantized_path = os.path.join(model_dir, f'{model_type}_model_quantized.pth')
-        
-        if not os.path.exists(quantized_path):
-            raise FileNotFoundError(f"Quantized model file not found: {quantized_path}")
-        
-        print(f"Loading quantized model from: {quantized_path}")
-        
-        # Apply dynamic quantization (same as in apply_ptq.py)
-        print("  Applying dynamic quantization structure...")
-        quantized_model = tq.quantize_dynamic(
-            model,
-            {torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d},
-            dtype=torch.qint8
-        )
-        
-        # Load the quantized state_dict
-        print("  Loading quantized weights...")
-        state_dict = torch.load(quantized_path, map_location="cpu", weights_only=True)
-        quantized_model.load_state_dict(state_dict)
-        
-        # Use the quantized model
-        model = quantized_model
-        
+        # print(f"Loading PT2E quantized program from: {quantized_path}")
+        # print("  Restoring exported program via torch.export.load...")
+        # try:
+        #     exported_program = torch.export.load(quantized_path)
+        #     model = exported_program.module()
+        # except Exception as e:
+        #     print(f"Failed loading ptq mode: {e}")
+        #     exit()
+
+
+        # Nuclear method for testing
+
+        model = apply_ptq_to_model(model_type, model_path, config_path)
+
+        import torchao
         # Ensure model stays on CPU for quantized models
         model = model.to('cpu')
+        torchao.quantization.pt2e.move_exported_model_to_eval(model)
         ptq_eval_safe = True
 
     # Print Parameter size
     param_bytes = sum(p.element_size() * p.nelement() for p in model.parameters())
     print(f"Parameter size: {param_bytes / 1e6:.2f} MB")
     
-    # Ensure evaluation mode for inference
-    if hasattr(model, "eval") and (test_type != "ptq" or ptq_eval_safe):
-        model.eval()
+    # # Ensure evaluation mode for inference
+    # if hasattr(model, "eval") and (test_type != "ptq" or ptq_eval_safe):
+    #     model.eval()
     
     # Collect predictions and true labels
     predictions = []
@@ -328,8 +311,8 @@ def evaluate_model(model_type, model_path, config_path, test_type="regular"):
                 print(f"  Processed batch {batch_idx}/{len(test_loader)}")
 
     # Convert to numpy arrays
-    predictions = np.array(predictions)
-    true_labels = np.array(true_labels)
+    predictions = np.asarray(predictions, dtype=np.float32).reshape(-1)
+    true_labels = np.asarray(true_labels, dtype=np.float32).reshape(-1)
 
     # Calculate binary predictions
     binary_predictions = (predictions > 0.5).astype(int)
